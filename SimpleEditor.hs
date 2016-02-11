@@ -26,6 +26,7 @@ import qualified Data.JSString as JS
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, maybe)
+import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import qualified Data.Patch as Patch
 import Data.Text (Text, findIndex)
@@ -209,43 +210,49 @@ lineAtY lines y = go lines y 0
       else go lines (y - line ^. lineHeight) (succ n)
 
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
-update' action model =
-  case action of
-    KeyPressed c  -> pure (handleAction (InsertChar c) model, Nothing)
-    KeyDowned c -- handle \r and \n ?
-      | c == 8    -> pure (handleAction DeleteChar model, Nothing)
-      | c == 32   -> pure (handleAction (InsertChar ' ') model, Nothing)
-      | otherwise -> pure (model, Nothing)
-    MouseClick e ->
-      do elem <- target e
+update' action model'' =
+  do (Just doc)        <- currentDocument
+     (Just editorElem) <- getElementById doc "editor"
+     rect <- getBoundingClientRect editorElem
+     let model = model'' { _editorPos = Just rect }
+     case action of
+      KeyPressed c  -> pure (handleAction (InsertChar c) model, Nothing)
+      KeyDowned c -- handle \r and \n ?
+        | c == 8    -> pure (handleAction DeleteChar model, Nothing)
+        | c == 32   -> pure (handleAction (InsertChar ' ') model, Nothing)
+        | otherwise -> pure (model, Nothing)
+      MouseClick e ->
+        do elem <- target e
+{-
          (Just doc) <- currentDocument
          (Just editorElem) <- getElementById doc "editor"
          rect <- getBoundingClientRect editorElem
-         targetRect <- getBoundingClientRect elem
-         let highlightLine (Just n) lines = lines & ix n %~ lineHighlight .~ True
-             highlightLine Nothing lines = lines
-             (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-         pure (model & mousePos ?~ (clientX e, clientY e)
-                     & editorPos ?~ rect
-                     & targetPos ?~ targetRect
-                     & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
-              , Nothing)
+-}
+           targetRect <- getBoundingClientRect elem
+           let highlightLine (Just n) lines = lines & ix n %~ lineHighlight .~ True
+               highlightLine Nothing lines = lines
+               (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+           pure (model & mousePos ?~ (clientX e, clientY e)
+--                     & editorPos ?~ rect
+                       & targetPos ?~ targetRect
+                       & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
+                , Nothing)
 
-    UpdateMetrics ->
-      do case model ^. measureElem of
-          Nothing -> do
-            (Just document) <- currentDocument
-            mme <- getElementById document "measureElement"
-            case mme of
-             Nothing -> pure (model { _debugMsg = Just "Could not find measureElement" }, Nothing)
-             (Just me) ->
-               do let model' = model & measureElem .~ (Just me)
-                  doMetrics model' me
-          (Just me) -> doMetrics model me
-      where
-        doMetrics model me =
-          do metrics <- mapM (getFontMetric me) [' '..'~']
-             pure $ (model & fontMetrics .~ (Map.fromList metrics) & debugMsg .~ (Just $ Text.pack $ show metrics) , Nothing)
+      UpdateMetrics ->
+        do case model ^. measureElem of
+            Nothing -> do
+              (Just document) <- currentDocument
+              mme <- getElementById document "measureElement"
+              case mme of
+                Nothing -> pure (model { _debugMsg = Just "Could not find measureElement" }, Nothing)
+                (Just me) ->
+                  do let model' = model & measureElem .~ (Just me)
+                     doMetrics model' me
+            (Just me) -> doMetrics model me
+        where
+          doMetrics model me =
+            do metrics <- mapM (getFontMetric me) [' '..'~']
+               pure $ (model & fontMetrics .~ (Map.fromList metrics) & debugMsg .~ (Just $ Text.pack $ show metrics) , Nothing)
 
 getFontMetric :: JSElement -> Char -> IO (Char, (Double, Double))
 getFontMetric measureElm c =
@@ -379,6 +386,31 @@ layout :: FontMetrics
 layout fm maxWidth input =
   -}
 
+-- | given a character index, calculate its (x,y) coordinates in the editor
+--
+indexToPos :: Int
+           -> Model
+           -> Maybe (Double, Double)
+indexToPos i model = go (model ^. layout) i (0,0)
+  where
+    go [] _ _ = Nothing
+    go (line:lines) i curPos =
+      case go' (line ^. lineBoxes) i curPos of
+       (Right curPos) -> Just curPos
+       (Left (i', (x,y))) ->
+         go lines i' (x, y + line ^. lineHeight)
+
+    go' [] i curPos = Left (i, curPos)
+    go' _ 0 curPos = Right curPos
+    go' (box:boxes) i (x,y) = go' boxes (pred i) (x + box ^. boxWidth, y)
+
+caretPos :: Model -> Maybe (Double, Double) -> [KV Text Text]
+caretPos model Nothing = []
+caretPos model (Just (x, y)) =
+  case model ^. editorPos of
+   Nothing -> []
+   (Just ep) -> ["style" := ("top: " <> (Text.pack $ show (y + (rectTop ep))) <> "px; left: " <> (Text.pack $ show (x + (rectLeft ep))) <> "px;")]
+
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
   let keyDownEvent  = Event KeyDown (\e -> when (keyCode e == 8 || keyCode e == 32) (preventDefault e) >> pure (KeyDowned (keyCode e)))
@@ -420,7 +452,7 @@ view' model =
 
             <h1>Editor</h1>
             <div id="editor" tabindex="1" style="outline: 0; height: 500px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent] >
-              <div id="caret" class="caret"></div>
+              <div id="caret" class="caret" (caretPos model (indexToPos 7 model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
            </div>
