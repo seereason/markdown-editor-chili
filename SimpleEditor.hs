@@ -25,7 +25,7 @@ import Data.Char (chr)
 import qualified Data.JSString as JS
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe, maybe)
+import Data.Maybe (fromJust, fromMaybe, maybe)
 import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import qualified Data.Patch as Patch
@@ -93,6 +93,7 @@ A deletion is always performed from the beginning of the text. Which in this cas
 data EditState
   = Inserting
   | Deleting
+  | MovingCaret
     deriving (Show, Eq)
 
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
@@ -125,7 +126,7 @@ data Action
 data EditAction
   = InsertChar Char
   | DeleteChar
-  | MoveCaret
+  | MoveCaret Index
     deriving Show
 
 handleAction :: EditAction -> Model -> Model
@@ -144,6 +145,16 @@ handleAction ea model
                                 , _index       = model ^. caret
                                 }
          in handleAction DeleteChar model'
+       MoveCaret {} ->
+         let newPatch   = Patch.fromList (model ^. currentEdit)
+             newPatches = (model ^. patches) ++ [newPatch]
+             newDoc     = apply newPatch (model ^. document)
+             model'     = model { _document    = newDoc
+                                , _patches     = newPatches
+                                , _currentEdit = []
+                                , _editState   = MovingCaret
+                                }
+         in handleAction ea model'
 
   | model ^. editState == Deleting =
       case ea of
@@ -158,6 +169,27 @@ handleAction ea model
                                 , _editState   = Inserting
                                 }
          in handleAction ea model'
+       MoveCaret {} ->
+         let newPatch   = Patch.fromList (model ^. currentEdit)
+             newPatches = (model ^. patches) ++ [newPatch]
+             newDoc     = apply newPatch (model ^. document)
+             model'     = model { _document    = newDoc
+                                , _patches     = newPatches
+                                , _currentEdit = []
+                                , _editState   = MovingCaret
+                                }
+         in handleAction ea model'
+
+  | model ^. editState == MovingCaret =
+      case ea of
+       MoveCaret i ->
+         model { _index = i
+               , _caret = i
+               }
+       InsertChar {} ->
+         handleAction ea (model { _editState = Inserting })
+       DeleteChar {} ->
+         handleAction ea (model { _editState = Deleting })
 
 insertChar :: Char -> Model -> Model
 insertChar c model =
@@ -175,7 +207,7 @@ backspaceChar model
  | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
   let index'  = pred (model ^. index)
       c       = (model ^. document) ! index'
-      newEdit = (model ^. currentEdit) ++ [Delete (model ^. index) c]
+      newEdit = (model ^. currentEdit) ++ [Delete index' c]
   in
    model { _currentEdit = newEdit
          , _index       = pred (model ^. index)
@@ -209,6 +241,33 @@ lineAtY lines y = go lines y 0
       then Just n
       else go lines (y - line ^. lineHeight) (succ n)
 
+indexAtPos :: FontMetrics -> [Line Text] -> (Double, Double) -> Maybe Int
+indexAtPos fm lines (x,y) =
+  case lineAtY lines y of
+   Nothing -> Nothing
+   (Just i) -> Just $ (sumPrevious $ take i lines) + indexAtX fm (lines!!i) x
+   where
+     sumPrevious lines = sum (map sumLine lines)
+     sumLine line = sum (map (\box -> Text.length (box ^. boxContent)) (line ^. lineBoxes))
+
+-- If we put Characters in boxes then we could perhaps generalize this
+indexAtX :: FontMetrics -> Line Text -> Double -> Int
+indexAtX fm line x = go (line ^. lineBoxes) x 0
+  where
+    indexAtX' :: [Char] -> Double -> Int -> Int
+    indexAtX' [] x i = i
+    indexAtX' (c:cs) x i =
+      let cWidth =  fst $ fromJust $ Map.lookup c fm
+      in if x < cWidth
+         then i
+         else indexAtX' cs (x - cWidth) (succ i)
+    go :: [Box Text] -> Double -> Int -> Int
+    go [] x i = i
+    go (box:boxes) x i
+      | x < (box ^. boxWidth) =
+          indexAtX' (Text.unpack (box ^. boxContent)) x i
+      | otherwise = go boxes (x - box ^. boxWidth) (i + Text.length (box ^. boxContent))
+
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
 update' action model'' =
   do (Just doc)        <- currentDocument
@@ -228,15 +287,25 @@ update' action model'' =
          (Just editorElem) <- getElementById doc "editor"
          rect <- getBoundingClientRect editorElem
 -}
+
            targetRect <- getBoundingClientRect elem
+           {-
            let highlightLine (Just n) lines = lines & ix n %~ lineHighlight .~ True
                highlightLine Nothing lines = lines
                (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-           pure (model & mousePos ?~ (clientX e, clientY e)
---                     & editorPos ?~ rect
-                       & targetPos ?~ targetRect
-                       & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
-                , Nothing)
+             -}
+           let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+               mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+               model' = model & mousePos ?~ (clientX e, clientY e)
+                              & caret .~ (fromMaybe (model ^. caret) mIndex)
+                              & targetPos ?~ targetRect
+           case mIndex of
+            (Just i) -> pure (handleAction (MoveCaret i) model', Nothing)
+            Nothing  -> pure (model', Nothing)
+
+--              & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
+--                       & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
+--                , Nothing)
 
       UpdateMetrics ->
         do case model ^. measureElem of
@@ -435,8 +504,20 @@ view' model =
   in
          ([hsx|
            <div>
+--            <p><% show (Patch.fromList (model ^. document)) %></p>
+--            <p><% show (model ^. debugMsg) %></p>
+--            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
+--            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
+--            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
+--            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
+
+            <h1>Editor</h1>
+            <div id="editor" tabindex="1" style="outline: 0; height: 500px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent] >
+              <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
+              <% renderDoc (model ^. layout) %>
+            </div>
             <h1>Debug</h1>
-            <p><% show (model ^. mousePos) %></p>
+            <p>mousePos: <% show (model ^. mousePos) %></p>
             <p>editorPos: <% let mpos = model ^. editorPos in
                     case mpos of
                      Nothing -> "(,)"
@@ -460,18 +541,7 @@ view' model =
             <p>Index: <% show (model ^. index) %></p>
             <p>Caret: <% show (model ^. caret) %></p>
 
---            <p><% show (Patch.fromList (model ^. document)) %></p>
---            <p><% show (model ^. debugMsg) %></p>
---            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 
-            <h1>Editor</h1>
-            <div id="editor" tabindex="1" style="outline: 0; height: 500px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent] >
-              <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-              <% renderDoc (model ^. layout) %>
-            </div>
            </div>
           |], [])
 
