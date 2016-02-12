@@ -396,20 +396,36 @@ indexToPos i model = go (model ^. layout) i (0,0)
     go [] _ _ = Nothing
     go (line:lines) i curPos =
       case go' (line ^. lineBoxes) i curPos of
-       (Right curPos) -> Just curPos
+       (Right curPos) -> curPos
        (Left (i', (x,y))) ->
-         go lines i' (x, y + line ^. lineHeight)
+         go lines i' (0, y + line ^. lineHeight)
 
     go' [] i curPos = Left (i, curPos)
-    go' _ 0 curPos = Right curPos
-    go' (box:boxes) i (x,y) = go' boxes (pred i) (x + box ^. boxWidth, y)
+    go' _ 0 curPos = Right (Just curPos)
+    go' (box:boxes) i (x,y) =
+      if i > Text.length (box ^. boxContent)
+         then go' boxes (i - Text.length (box ^. boxContent)) (x + box ^. boxWidth, y)
+         else case indexToPosTxt i (model ^. fontMetrics) box of
+               Nothing   -> Right Nothing
+               (Just x') -> Right (Just (x + x', y))
+
+indexToPosTxt :: Int -> FontMetrics -> Box Text -> Maybe Double
+indexToPosTxt index fm box
+  | Text.length (box ^. boxContent) < index = Nothing
+  | otherwise =
+      Just $ Text.foldr sumWidth 0 (Text.take index (box ^. boxContent))
+  where
+    sumWidth c acc =
+      case Map.lookup c fm of
+        Just (w, _) -> acc + w
+        Nothing -> acc
 
 caretPos :: Model -> Maybe (Double, Double) -> [KV Text Text]
 caretPos model Nothing = []
 caretPos model (Just (x, y)) =
   case model ^. editorPos of
    Nothing -> []
-   (Just ep) -> ["style" := ("top: " <> (Text.pack $ show (y + (rectTop ep))) <> "px; left: " <> (Text.pack $ show (x + (rectLeft ep))) <> "px;")]
+   (Just ep) -> ["style" := ("top: " <> (Text.pack $ show (y{- + (rectTop ep) -})) <> "px; left: " <> (Text.pack $ show (x {- + (rectLeft ep) -}) <> "px;"))]
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
@@ -442,6 +458,7 @@ view' model =
             <p>Patches: <% show (model  ^. patches) %></p>
             <p>Current Patch: <% show (model  ^. currentEdit) %></p>
             <p>Index: <% show (model ^. index) %></p>
+            <p>Caret: <% show (model ^. caret) %></p>
 
 --            <p><% show (Patch.fromList (model ^. document)) %></p>
 --            <p><% show (model ^. debugMsg) %></p>
@@ -452,7 +469,7 @@ view' model =
 
             <h1>Editor</h1>
             <div id="editor" tabindex="1" style="outline: 0; height: 500px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent] >
-              <div id="caret" class="caret" (caretPos model (indexToPos 7 model))></div>
+              <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
            </div>
