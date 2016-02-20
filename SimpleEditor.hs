@@ -17,12 +17,13 @@
 {-# LANGUAGE ImpredicativeTypes #-}
 module Main where
 
-import Control.Lens ((^.), (.~), (?~), (&), (%~))
+import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just)
 import Control.Lens.At (ix)
 import Control.Lens.TH (makeLenses)
 import Control.Monad (when)
 import Data.Char (chr)
 import qualified Data.JSString as JS
+import Data.JSString.Text (textToJSString, textFromJSString)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, maybe)
@@ -96,6 +97,13 @@ data EditState
   | MovingCaret
     deriving (Show, Eq)
 
+data SelectionData = SelectionData
+  { _selection       :: Selection
+  , _selectionString :: String
+  , _rangeCount      :: Int
+  }
+makeLenses ''SelectionData
+
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _document    :: Vector Char -- ^ all of the patches applied but not the _currentEdit
@@ -112,6 +120,7 @@ data Model = Model
   , _targetPos   :: Maybe DOMClientRect
   , _layout      :: [Line Text]
   , _maxWidth    :: Double
+  , _selectionData :: Maybe SelectionData
   }
 makeLenses ''Model
 
@@ -121,6 +130,8 @@ data Action
     | UpdateMetrics
     | GetMeasureElement
     | MouseClick MouseEventObject
+    | CopyA ClipboardEventObject
+    | PasteA JS.JSString
     deriving Show
 
 data EditAction
@@ -268,13 +279,38 @@ indexAtX fm line x = go (line ^. lineBoxes) x 0
           indexAtX' (Text.unpack (box ^. boxContent)) x i
       | otherwise = go boxes (x - box ^. boxWidth) (i + Text.length (box ^. boxContent))
 
+getSelectionData :: IO (Maybe SelectionData)
+getSelectionData =
+  do w <- window
+     sel <- getSelection w
+--     js_alert =<< (selectionToString sel)
+     c <- getRangeCount sel
+     txt <- selectionToString sel
+     pure $ Just $ SelectionData { _selection = sel
+                                 , _selectionString = JS.unpack txt
+                                 , _rangeCount = c
+                                 }
+
+foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plain\")" getClipboardData ::
+        ClipboardEventObject -> IO JS.JSString
+
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
 update' action model'' =
   do (Just doc)        <- currentDocument
      (Just editorElem) <- getElementById doc "editor"
      rect <- getBoundingClientRect editorElem
-     let model = model'' { _editorPos = Just rect }
+     mSelectionData <- getSelectionData
+     let model = model'' { _editorPos = Just rect
+                         , _selectionData = mSelectionData
+                         }
      case action of
+      CopyA ceo      -> do cd <- clipboardData ceo
+                           setDataTransferData cd "text/plain" "Boo-yeah!"
+                           pure (model & debugMsg .~ Just "copy", Nothing)
+      PasteA txt -> do -- txt <- getDataTransferData dt "text/plain"
+--                       txt2 <- getClipboardData ceo
+--                       js_alert txt2
+                       pure (model & debugMsg .~ Just (textFromJSString txt), Nothing)
       KeyPressed c  -> pure (handleAction (InsertChar c) model, Nothing)
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> pure (handleAction DeleteChar model, Nothing)
@@ -498,25 +534,29 @@ caretPos model (Just (x, y)) =
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
-  let keyDownEvent  = Event KeyDown (\e -> when (keyCode e == 8 || keyCode e == 32) (preventDefault e) >> pure (KeyDowned (keyCode e)))
+  let keyDownEvent  = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32) (preventDefault e) >> pure (KeyDowned (keyCode e)))
       keyPressEvent = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
-      clickEvent    = Event Click (\e -> pure (MouseClick e))
+      clickEvent    = Event Click    (\e -> pure (MouseClick e))
+      copyEvent     = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
+      pasteEvent    = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
   in
          ([hsx|
            <div>
 --            <p><% show (Patch.fromList (model ^. document)) %></p>
---            <p><% show (model ^. debugMsg) %></p>
+
 --            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 
             <h1>Editor</h1>
-            <div id="editor" tabindex="1" style="outline: 0; height: 500px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent] >
+            <input type="text" value="" [copyEvent, pasteEvent, copyEvent] />
+            <div id="editor" tabindex="1" style="outline: 0; height: 200px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
             <h1>Debug</h1>
+            <p>debugMsg: <% show (model ^. debugMsg) %></p>
             <p>mousePos: <% show (model ^. mousePos) %></p>
             <p>editorPos: <% let mpos = model ^. editorPos in
                     case mpos of
@@ -540,8 +580,15 @@ view' model =
             <p>Current Patch: <% show (model  ^. currentEdit) %></p>
             <p>Index: <% show (model ^. index) %></p>
             <p>Caret: <% show (model ^. caret) %></p>
-
-
+            <% case model ^. selectionData of
+                 Nothing -> <p>No Selection</p>
+                 (Just selectionData) ->
+                   <div>
+                    <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
+                    <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
+                    <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                   </div>
+            %>
            </div>
           |], [])
 
@@ -561,6 +608,7 @@ editorMUV =
                        , _targetPos   = Nothing
                        , _layout      = []
                        , _maxWidth    = 300
+                       , _selectionData = Nothing
                        }
       , update = update'
       , view   = view'
