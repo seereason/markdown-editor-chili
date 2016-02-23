@@ -15,6 +15,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE PolyKinds #-}
 module Main where
 
 import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just)
@@ -46,7 +47,21 @@ type Document = Vector Char -- [Edit Char]
 type Index = Int
 type FontMetrics = Map Char (Double, Double)
 
+data Box c a = Box
+  { _boxWidth     :: Double
+  , _boxHeight    :: Double
+  , _boxContent   :: a
+  }
+makeLenses ''Box
 
+type TextBox = Box Text Text
+
+data Direction
+  = Horizontal
+  | Vertical
+    deriving (Eq, Show)
+
+{-
 data Box a = Box
   { _boxWidth     :: Double
   , _boxHeight    :: Double
@@ -56,12 +71,24 @@ data Box a = Box
   deriving Show
 makeLenses ''Box
 
+data DirBox dir a = DirBox
+  { _dirBoxWidth  :: Double
+  , _dirBoxHeight :: Double
+  , _dirBoxContent :: [a]
+  }
+  deriving (Eq, Show)
+makeLenses ''DirBox
+
 data Line a = Line
   { _lineHeight :: Double
   , _lineBoxes  :: [Box a]
   , _lineHighlight :: Bool
   }
 makeLenses ''Line
+-}
+
+type HBox a = Box Horizontal a
+type VBox a = Box Vertical a
 
 {-
 
@@ -118,7 +145,7 @@ data Model = Model
   , _mousePos    :: Maybe (Double, Double)
   , _editorPos   :: Maybe DOMClientRect
   , _targetPos   :: Maybe DOMClientRect
-  , _layout      :: [Line Text]
+  , _layout      :: VBox [HBox [TextBox]]
   , _maxWidth    :: Double
   , _selectionData :: Maybe SelectionData
   }
@@ -139,6 +166,115 @@ data EditAction
   | DeleteChar
   | MoveCaret Index
     deriving Show
+{-
+calcSizes :: [[TextBox]] -> VBox [HBox [TextBox]]
+calcSizes [] = Box 0 0 []
+calcSizes (line:lines) =
+  mkBox (mkBox line : calcSizes lines)
+  where
+--    mkBox :: forall c. [TextBox] -> Box c [TextBox]
+    mkBox :: [a] -> Box c [a]
+    mkBox [] = Box 0 0 []
+    mkBox boxes =
+      Box { _boxWidth   = sum (map _boxWidth boxes)
+          , _boxHeight  = maximum (map _boxHeight boxes)
+          , _boxContent = boxes
+          }
+-}
+
+calcSizes :: [[TextBox]] -> VBox [HBox [TextBox]]
+calcSizes [] = Box 0 0 []
+calcSizes lines =
+  mkHBox (map mkHBox lines)
+--  mkVBox [] -- (mkHBox line : calcSizes lines)
+  where
+--    mkVBox [] = Box 0 0 []
+--    mkHBox [] = Box 0 0 []
+    mkHBox boxes =
+      Box { _boxWidth   = sum (map _boxWidth boxes)
+          , _boxHeight  = maximum (map _boxHeight boxes)
+          , _boxContent = boxes
+          }
+
+{-
+    mkLine boxes = Line { _lineHeight = maximum (map _boxHeight boxes)
+                        , _lineBoxes = boxes
+                        , _lineHighlight = False
+                        }
+-}
+
+textToBox :: FontMetrics -> Text -> TextBox
+textToBox fm input
+  | Text.null input = Box { _boxWidth     = 0
+                          , _boxHeight    = 0
+                          , _boxContent   = input
+                          }
+  | otherwise =
+      Box { _boxWidth     = Text.foldr (\c w -> w + getWidth fm c) 0 input
+          , _boxHeight    = getHeight fm (Text.head input)
+          , _boxContent   = input
+          }
+  where
+    getWidth, getHeight :: FontMetrics -> Char -> Double
+    getWidth  fm c = maybe 0 fst (Map.lookup c fm)
+    getHeight fm c = maybe 0 snd (Map.lookup c fm)
+
+-- | similar to words except whitespace is preserved at the end of a word
+textToWords :: Text -> [Text]
+textToWords txt
+  | Text.null txt = []
+  | otherwise =
+      let whiteIndex   = fromMaybe 0 $ findIndex (\c -> c ==' ') txt
+          charIndex    = fromMaybe 0 $ findIndex (\c -> c /= ' ') (Text.drop whiteIndex txt)
+      in case whiteIndex + charIndex of
+          0 -> [txt]
+          _ -> let (word, rest) = Text.splitAt (whiteIndex + charIndex) txt
+               in (word : textToWords rest)
+
+-- | FIXME: possibly not tail recursive -- should probably use foldr or foldl'
+layoutBoxes :: Double -> (Double, [Box c a]) -> [[Box c a]]
+layoutBoxes maxWidth (currWidth, []) = []
+layoutBoxes maxWidth (currWidth, (box:boxes))
+  | currWidth + (box ^. boxWidth) <= maxWidth =
+      case layoutBoxes maxWidth ((currWidth + (box ^. boxWidth)), boxes) of
+       [] -> [[box]] -- this is the last box
+       (line:lines) -> (box:line):lines
+  -- if a box is longer than the maxWidth we will place it at the start of a line and let it overflow
+  | (currWidth == 0) && (box ^. boxWidth > maxWidth) =
+      [box] : layoutBoxes maxWidth (0, boxes)
+  | otherwise =
+      ([]:layoutBoxes maxWidth (0, box:boxes))
+
+textToLines :: FontMetrics -> Double -> Int -> Text -> VBox [HBox [TextBox]]
+textToLines fm maxWidth caret txt =
+  let boxes = map (textToBox fm) (textToWords txt)
+--      boxes' = boxes & ix caret %~ boxHighlight .~ True
+  in calcSizes $ layoutBoxes maxWidth (0, boxes)
+
+insertChar :: Char -> Model -> Model
+insertChar c model =
+  let newEdit =  (model ^. currentEdit) ++ [Insert (model ^. index) (if c == '\r' then '\n' else c)]
+  in
+   model { _currentEdit = newEdit
+--        , _index    = model ^. index
+         , _caret       = succ (model ^. caret)
+         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
+         }
+
+-- in --  newDoc =   (model ^. document) ++ [Delete (model ^. index) ' '] -- FIXME: won't work correctly if converted to a replace
+backspaceChar :: Model -> Model
+backspaceChar model
+ | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
+  let index'  = pred (model ^. index)
+      c       = (model ^. document) ! index'
+      newEdit = (model ^. currentEdit) ++ [Delete index' c]
+  in
+   model { _currentEdit = newEdit
+         , _index       = pred (model ^. index)
+         , _caret       = pred (model ^. caret)
+         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
+         }
+ | otherwise = model
 
 handleAction :: EditAction -> Model -> Model
 handleAction ea model
@@ -202,31 +338,6 @@ handleAction ea model
        DeleteChar {} ->
          handleAction ea (model { _editState = Deleting })
 
-insertChar :: Char -> Model -> Model
-insertChar c model =
-  let newEdit =  (model ^. currentEdit) ++ [Insert (model ^. index) (if c == '\r' then '\n' else c)]
-  in
-   model { _currentEdit = newEdit
---        , _index    = model ^. index
-         , _caret       = succ (model ^. caret)
-         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
-         }
-
--- in --  newDoc =   (model ^. document) ++ [Delete (model ^. index) ' '] -- FIXME: won't work correctly if converted to a replace
-backspaceChar :: Model -> Model
-backspaceChar model
- | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
-  let index'  = pred (model ^. index)
-      c       = (model ^. document) ! index'
-      newEdit = (model ^. currentEdit) ++ [Delete index' c]
-  in
-   model { _currentEdit = newEdit
-         , _index       = pred (model ^. index)
-         , _caret       = pred (model ^. caret)
-         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
-         }
- | otherwise = model
-{--}
 {-
 relativeClickPos model =
   let mepos = model ^. editorPos in
@@ -243,27 +354,18 @@ relativeClickPos model mx my =
     Nothing     -> Nothing
     (Just epos) -> Just (mx - (rectLeft epos), my - (rectTop epos))
 
-lineAtY :: [Line a] -> Double -> Maybe Int
-lineAtY lines y = go lines y 0
+lineAtY :: VBox [HBox a] -> Double -> Maybe Int
+lineAtY vbox y = go (vbox ^. boxContent) y 0
   where
     go [] _ _ = Nothing
-    go (line:lines) y n =
-      if y < line ^. lineHeight
+    go (hbox:hboxes) y n =
+      if y < hbox ^. boxHeight
       then Just n
-      else go lines (y - line ^. lineHeight) (succ n)
-
-indexAtPos :: FontMetrics -> [Line Text] -> (Double, Double) -> Maybe Int
-indexAtPos fm lines (x,y) =
-  case lineAtY lines y of
-   Nothing -> Nothing
-   (Just i) -> Just $ (sumPrevious $ take i lines) + indexAtX fm (lines!!i) x
-   where
-     sumPrevious lines = sum (map sumLine lines)
-     sumLine line = sum (map (\box -> Text.length (box ^. boxContent)) (line ^. lineBoxes))
+      else go hboxes (y - hbox ^. boxHeight) (succ n)
 
 -- If we put Characters in boxes then we could perhaps generalize this
-indexAtX :: FontMetrics -> Line Text -> Double -> Int
-indexAtX fm line x = go (line ^. lineBoxes) x 0
+indexAtX :: FontMetrics -> HBox [TextBox] -> Double -> Int
+indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
     indexAtX' :: [Char] -> Double -> Int -> Int
     indexAtX' [] x i = i
@@ -272,12 +374,32 @@ indexAtX fm line x = go (line ^. lineBoxes) x 0
       in if x < cWidth
          then i
          else indexAtX' cs (x - cWidth) (succ i)
-    go :: [Box Text] -> Double -> Int -> Int
+    go :: [TextBox] -> Double -> Int -> Int
     go [] x i = i
     go (box:boxes) x i
       | x < (box ^. boxWidth) =
           indexAtX' (Text.unpack (box ^. boxContent)) x i
       | otherwise = go boxes (x - box ^. boxWidth) (i + Text.length (box ^. boxContent))
+
+indexAtPos :: FontMetrics -> VBox [HBox [TextBox]] -> (Double, Double) -> Maybe Int
+indexAtPos fm vbox (x,y) =
+  case lineAtY vbox y of
+   Nothing -> Nothing
+   (Just i) -> Just $ (sumPrevious $ take i (vbox ^. boxContent)) + indexAtX fm ((vbox ^. boxContent)!!i) x
+   where
+--     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
+     sumPrevious vboxes = sum (map sumLine vboxes)
+--     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
+     sumLine vbox = sum (map (\box -> Text.length (box ^. boxContent)) (vbox ^. boxContent))
+
+getFontMetric :: JSElement -> Char -> IO (Char, (Double, Double))
+getFontMetric measureElm c =
+  do setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
+     domRect <- getBoundingClientRect measureElm
+     -- FIXME: width and height are not official properties of DOMClientRect
+     let w = width domRect / 100
+         h = height domRect
+     pure (c, (w, h))
 
 getSelectionData :: IO (Maybe SelectionData)
 getSelectionData =
@@ -290,10 +412,10 @@ getSelectionData =
                                  , _selectionString = JS.unpack txt
                                  , _rangeCount = c
                                  }
-
+{-
 foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plain\")" getClipboardData ::
         ClipboardEventObject -> IO JS.JSString
-
+-}
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
 update' action model'' =
   do (Just doc)        <- currentDocument
@@ -359,28 +481,8 @@ update' action model'' =
             do metrics <- mapM (getFontMetric me) [' '..'~']
                pure $ (model & fontMetrics .~ (Map.fromList metrics) & debugMsg .~ (Just $ Text.pack $ show metrics) , Nothing)
 
-getFontMetric :: JSElement -> Char -> IO (Char, (Double, Double))
-getFontMetric measureElm c =
-  do setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
-     domRect <- getBoundingClientRect measureElm
-     -- FIXME: width and height are not official properties of DOMClientRect
-     let w = width domRect / 100
-         h = height domRect
-     pure (c, (w, h))
-
--- | similar to words except whitespace is preserved at the end of a word
-textToWords :: Text -> [Text]
-textToWords txt
-  | Text.null txt = []
-  | otherwise =
-      let whiteIndex   = fromMaybe 0 $ findIndex (\c -> c ==' ') txt
-          charIndex    = fromMaybe 0 $ findIndex (\c -> c /= ' ') (Text.drop whiteIndex txt)
-      in case whiteIndex + charIndex of
-          0 -> [txt]
-          _ -> let (word, rest) = Text.splitAt (whiteIndex + charIndex) txt
-               in (word : textToWords rest)
-
-textToBox :: FontMetrics -> Text -> Box Text
+{-
+textToBox :: FontMetrics -> Text -> TextBox
 textToBox fm input
   | Text.null input = Box { _boxWidth     = 0
                           , _boxHeight    = 0
@@ -397,7 +499,8 @@ textToBox fm input
     getWidth, getHeight :: FontMetrics -> Char -> Double
     getWidth  fm c = maybe 0 fst (Map.lookup c fm)
     getHeight fm c = maybe 0 snd (Map.lookup c fm)
-
+-}
+{-
 -- foldl :: Foldable t => (b -> a -> b) -> b -> t a -> b
 -- foldr :: Foldable t => (a -> b -> b) -> b -> t a -> b
 
@@ -415,38 +518,25 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
   | otherwise =
       ([]:layoutBoxes maxWidth (0, box:boxes))
 
-calcSizes :: [[Box a]] -> [Line a]
-calcSizes [] = []
-calcSizes (line:lines) =
-  mkLine line : calcSizes lines
-  where
-    mkLine [] = Line 0 [] False
-    mkLine boxes = Line { _lineHeight = maximum (map _boxHeight boxes)
-                        , _lineBoxes = boxes
-                        , _lineHighlight = False
-                        }
 
-renderTextBoxes :: [Line Text] -> HTML Action
-renderTextBoxes lines =
-  [hsx| <div class="lines"><% map renderTextBoxes' lines %></div> |]
+-}
 
-renderTextBoxes' :: Line Text -> HTML Action
-renderTextBoxes' line =
-  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
-
-renderTextBox :: Box Text -> HTML Action
+renderTextBox :: TextBox -> HTML Action
 -- renderTextBox box = CDATA True (box ^. boxContent)
-renderTextBox box = [hsx| <span (if box ^. boxHighlight then [(("class" :: Text) := ("highlight" :: Text))] else [])><% nbsp $ box ^. boxContent %></span> |]
+renderTextBox box = [hsx| <span><% nbsp $ box ^. boxContent %></span> |]
   where
     nbsp = Text.replace " " (Text.singleton '\160')
 
-textToLines :: FontMetrics -> Double -> Int -> Text -> [Line Text]
-textToLines fm maxWidth caret txt =
-  let boxes = map (textToBox fm) (textToWords txt)
-      boxes' = boxes & ix caret %~ boxHighlight .~ True
-  in calcSizes $ layoutBoxes maxWidth (0, boxes')
+renderTextBoxes' :: HBox [TextBox] -> HTML Action
+renderTextBoxes' box =
+    [hsx| <div class=("line"::Text)><% map renderTextBox (box ^. boxContent)  %></div> |]
+--  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
 
-linesToHTML :: [Line Text] -> HTML Action
+renderTextBoxes :: VBox [HBox [TextBox]] -> HTML Action
+renderTextBoxes lines =
+  [hsx| <div class="lines"><% map renderTextBoxes' (lines ^. boxContent) %></div> |]
+
+linesToHTML :: VBox [HBox [TextBox]] -> HTML Action
 linesToHTML lines = renderTextBoxes lines
 {-
 textToHTML :: FontMetrics -> Double -> Int -> Text -> HTML Action
@@ -456,7 +546,8 @@ textToHTML fm maxWidth caret txt =
   in
    renderTextBoxes (layoutBoxes maxWidth (0, boxes'))
 -}
-renderDoc :: [Line Text] -> HTML Action
+
+renderDoc :: VBox [HBox [TextBox]] -> HTML Action
 renderDoc lines =
   [hsx|
     <div data-path="root">
@@ -474,47 +565,9 @@ renderDoc lines =
        [] -> [b]
        [c] -> b : [""]
        (_:cs) -> b : rlines cs
-{-
-    caret :: HTML Action
-    caret =  [hsx| <span class="caret">♦</span> |]
-    addP [] = [caret]
-    addP [l] = [[hsx| <p><% l %><% caret %></p> |]]
-    addP (l:ls) = (p l) : addP ls
-    p c = [hsx| <p><% c %></p> |]
--}
--- | based on the font metrics, maximum width, and input text, calculate the line breaks
-{-
-layout :: FontMetrics
-       -> Double
-       -> Text
-       -> [Text]
-layout fm maxWidth input =
-  -}
 
--- | given a character index, calculate its (x,y) coordinates in the editor
---
-indexToPos :: Int
-           -> Model
-           -> Maybe (Double, Double)
-indexToPos i model = go (model ^. layout) i (0,0)
-  where
-    go [] _ _ = Nothing
-    go (line:lines) i curPos =
-      case go' (line ^. lineBoxes) i curPos of
-       (Right curPos) -> curPos
-       (Left (i', (x,y))) ->
-         go lines i' (0, y + line ^. lineHeight)
 
-    go' [] i curPos = Left (i, curPos)
-    go' _ 0 curPos = Right (Just curPos)
-    go' (box:boxes) i (x,y) =
-      if i > Text.length (box ^. boxContent)
-         then go' boxes (i - Text.length (box ^. boxContent)) (x + box ^. boxWidth, y)
-         else case indexToPosTxt i (model ^. fontMetrics) box of
-               Nothing   -> Right Nothing
-               (Just x') -> Right (Just (x + x', y))
-
-indexToPosTxt :: Int -> FontMetrics -> Box Text -> Maybe Double
+indexToPosTxt :: Int -> FontMetrics -> TextBox -> Maybe Double
 indexToPosTxt index fm box
   | Text.length (box ^. boxContent) < index = Nothing
   | otherwise =
@@ -524,6 +577,29 @@ indexToPosTxt index fm box
       case Map.lookup c fm of
         Just (w, _) -> acc + w
         Nothing -> acc
+
+-- | given a character index, calculate its (x,y) coordinates in the editor
+--
+indexToPos :: Int
+           -> Model
+           -> Maybe (Double, Double)
+indexToPos i model = go (model ^. layout ^. boxContent) i (0,0)
+  where
+    go [] _ _ = Nothing
+    go (hbox:hboxes) i curPos =
+      case go' (hbox ^. boxContent) i curPos of
+       (Right curPos) -> curPos
+       (Left (i', (x,y))) ->
+         go hboxes i' (0, y + hbox ^. boxHeight)
+
+    go' [] i curPos = Left (i, curPos)
+    go' _ 0 curPos = Right (Just curPos)
+    go' (box:boxes) i (x,y) =
+      if i > Text.length (box ^. boxContent)
+         then go' boxes (i - Text.length (box ^. boxContent)) (x + box ^. boxWidth, y)
+         else case indexToPosTxt i (model ^. fontMetrics) box of
+               Nothing   -> Right Nothing
+               (Just x') -> Right (Just (x + x', y))
 
 caretPos :: Model -> Maybe (Double, Double) -> [KV Text Text]
 caretPos model Nothing = []
@@ -573,7 +649,7 @@ view' model =
                     case mpos of
                      Nothing -> "(,)"
                      (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-            <p>line heights: <% show (map _lineHeight (model ^. layout)) %></p>
+            <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
 
             <p>Document: <% show (model ^. document) %></p>
             <p>Patches: <% show (model  ^. patches) %></p>
@@ -606,7 +682,7 @@ editorMUV =
                        , _mousePos    = Nothing
                        , _editorPos   = Nothing
                        , _targetPos   = Nothing
-                       , _layout      = []
+                       , _layout      = Box 0 0 []
                        , _maxWidth    = 300
                        , _selectionData = Nothing
                        }
@@ -617,3 +693,4 @@ editorMUV =
 main :: IO ()
 main =
   muv editorMUV id (Just UpdateMetrics)
+
