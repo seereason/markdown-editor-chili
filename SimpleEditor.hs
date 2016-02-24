@@ -43,7 +43,7 @@ import Language.Haskell.HSX.QQ (hsx)
 import Web.ISO.HSX
 import Web.ISO.Types
 
-type Document = Vector Char -- [Edit Char]
+-- type Document = Vector Char -- [Edit Char]
 type Index = Int
 type FontMetrics = Map Char (Double, Double)
 
@@ -54,38 +54,43 @@ data Box c a = Box
   }
 makeLenses ''Box
 
-type TextBox = Box Text Text
+data Image = Image
+  { _imageUrl :: Text
+  , _imageWidth :: Double
+  , _imageHeight :: Double
+  }
+  deriving (Eq, Show)
+makeLenses ''Image
+
+data Atom
+  = RichChar Char
+  | RichText Text
+  | Img Image
+    deriving (Eq, Show)
+
+isRichChar :: Atom -> Bool
+isRichChar (RichChar {}) = True
+isRichChar _             = False
+
+unRichChar :: Atom -> Char
+unRichChar (RichChar c) = c
+
+atomLength :: Atom -> Int
+atomLength (RichChar {})  = 1
+atomLength (RichText txt) = Text.length txt
+atomLength (Img {})       = 1
+
+
+-- type TextBox  = Box Text Text
+-- type ImageBox = Box Image Image
+
+type AtomBox  = Box Singleton Atom
 
 data Direction
   = Horizontal
   | Vertical
+  | Singleton
     deriving (Eq, Show)
-
-{-
-data Box a = Box
-  { _boxWidth     :: Double
-  , _boxHeight    :: Double
-  , _boxContent   :: a
-  , _boxHighlight :: Bool
-  }
-  deriving Show
-makeLenses ''Box
-
-data DirBox dir a = DirBox
-  { _dirBoxWidth  :: Double
-  , _dirBoxHeight :: Double
-  , _dirBoxContent :: [a]
-  }
-  deriving (Eq, Show)
-makeLenses ''DirBox
-
-data Line a = Line
-  { _lineHeight :: Double
-  , _lineBoxes  :: [Box a]
-  , _lineHighlight :: Bool
-  }
-makeLenses ''Line
--}
 
 type HBox a = Box Horizontal a
 type VBox a = Box Vertical a
@@ -133,9 +138,9 @@ makeLenses ''SelectionData
 
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
-  { _document    :: Vector Char -- ^ all of the patches applied but not the _currentEdit
-  , _patches     :: [Patch Char]
-  , _currentEdit :: [Edit Char]
+  { _document    :: Vector Atom -- ^ all of the patches applied but not the _currentEdit
+  , _patches     :: [Patch Atom]
+  , _currentEdit :: [Edit Atom]
   , _editState   :: EditState
   , _index       :: Index -- ^ current index for patch edit operations
   , _caret       :: Index -- ^ position of caret
@@ -145,7 +150,7 @@ data Model = Model
   , _mousePos    :: Maybe (Double, Double)
   , _editorPos   :: Maybe DOMClientRect
   , _targetPos   :: Maybe DOMClientRect
-  , _layout      :: VBox [HBox [TextBox]]
+  , _layout      :: VBox [HBox [AtomBox]]
   , _maxWidth    :: Double
   , _selectionData :: Maybe SelectionData
   }
@@ -159,11 +164,12 @@ data Action
     | MouseClick MouseEventObject
     | CopyA ClipboardEventObject
     | PasteA JS.JSString
+    | AddImage
     deriving Show
 
 data EditAction
-  = InsertChar Char
-  | DeleteChar
+  = InsertAtom Atom
+  | DeleteAtom
   | MoveCaret Index
     deriving Show
 {-
@@ -182,7 +188,7 @@ calcSizes (line:lines) =
           }
 -}
 
-calcSizes :: [[TextBox]] -> VBox [HBox [TextBox]]
+calcSizes :: [[AtomBox]] -> VBox [HBox [AtomBox]]
 calcSizes [] = Box 0 0 []
 calcSizes lines =
   mkHBox (map mkHBox lines)
@@ -196,23 +202,20 @@ calcSizes lines =
           , _boxContent = boxes
           }
 
-{-
-    mkLine boxes = Line { _lineHeight = maximum (map _boxHeight boxes)
-                        , _lineBoxes = boxes
-                        , _lineHighlight = False
-                        }
--}
-
-textToBox :: FontMetrics -> Text -> TextBox
+-- | convert a 'Text' to a 'Box'.
+--
+-- Note that the Text will be 'unbreakable'. If you want to be able to
+-- break on whitespace, first use 'textToWords'.
+textToBox :: FontMetrics -> Text -> AtomBox
 textToBox fm input
   | Text.null input = Box { _boxWidth     = 0
                           , _boxHeight    = 0
-                          , _boxContent   = input
+                          , _boxContent   = RichText input
                           }
   | otherwise =
       Box { _boxWidth     = Text.foldr (\c w -> w + getWidth fm c) 0 input
           , _boxHeight    = getHeight fm (Text.head input)
-          , _boxContent   = input
+          , _boxContent   = RichText input
           }
   where
     getWidth, getHeight :: FontMetrics -> Char -> Double
@@ -244,21 +247,39 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
       [box] : layoutBoxes maxWidth (0, boxes)
   | otherwise =
       ([]:layoutBoxes maxWidth (0, box:boxes))
-
-textToLines :: FontMetrics -> Double -> Int -> Text -> VBox [HBox [TextBox]]
+{-
+textToLines :: FontMetrics -> Double -> Int -> Text -> VBox [HBox [AtomBox]]
 textToLines fm maxWidth caret txt =
   let boxes = map (textToBox fm) (textToWords txt)
---      boxes' = boxes & ix caret %~ boxHighlight .~ True
+  in calcSizes $ layoutBoxes maxWidth (0, boxes)
+-}
+-- FIXME: should probably use a fold or something
+boxify :: FontMetrics -> Vector Atom -> [AtomBox]
+boxify fm v
+  | Vector.null v = []
+  | otherwise =
+    case (Vector.head v) of
+      RichChar {} ->
+        case Vector.span isRichChar v of
+          (richChars, rest) ->
+            (map (textToBox fm) $ textToWords $ Text.pack (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
+      atom@(Img img) ->
+        (Box (img ^. imageWidth) (img ^. imageHeight) atom) : boxify fm (Vector.tail v)
+
+atomsToLines :: FontMetrics -> Double -> Vector Atom -> VBox [HBox [AtomBox]]
+atomsToLines fm maxWidth atoms =
+  let boxes = boxify fm atoms -- map (textToBox fm) (textToWords txt)
   in calcSizes $ layoutBoxes maxWidth (0, boxes)
 
-insertChar :: Char -> Model -> Model
-insertChar c model =
-  let newEdit =  (model ^. currentEdit) ++ [Insert (model ^. index) (if c == '\r' then '\n' else c)]
+insertChar :: Atom -> Model -> Model
+insertChar atom model =
+  let newEdit =  (model ^. currentEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
   in
    model { _currentEdit = newEdit
 --        , _index    = model ^. index
          , _caret       = succ (model ^. caret)
-         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
+         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
+  --       , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
          }
 
 -- in --  newDoc =   (model ^. document) ++ [Delete (model ^. index) ' '] -- FIXME: won't work correctly if converted to a replace
@@ -272,7 +293,7 @@ backspaceChar model
    model { _currentEdit = newEdit
          , _index       = pred (model ^. index)
          , _caret       = pred (model ^. caret)
-         , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
+         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
          }
  | otherwise = model
 
@@ -280,8 +301,8 @@ handleAction :: EditAction -> Model -> Model
 handleAction ea model
   | model ^. editState == Inserting =
       case ea of
-       InsertChar c -> insertChar c model
-       DeleteChar ->
+       InsertAtom c -> insertChar c model
+       DeleteAtom ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
              newDoc     = apply newPatch (model ^. document)
@@ -291,7 +312,7 @@ handleAction ea model
                                 , _editState   = Deleting
                                 , _index       = model ^. caret
                                 }
-         in handleAction DeleteChar model'
+         in handleAction DeleteAtom model'
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
@@ -305,8 +326,8 @@ handleAction ea model
 
   | model ^. editState == Deleting =
       case ea of
-       DeleteChar -> backspaceChar model
-       InsertChar _ ->
+       DeleteAtom -> backspaceChar model
+       InsertAtom _ ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
              newDoc     = apply newPatch (model ^. document)
@@ -333,9 +354,9 @@ handleAction ea model
          model { _index = i
                , _caret = i
                }
-       InsertChar {} ->
+       InsertAtom {} ->
          handleAction ea (model { _editState = Inserting })
-       DeleteChar {} ->
+       DeleteAtom {} ->
          handleAction ea (model { _editState = Deleting })
 
 {-
@@ -364,7 +385,7 @@ lineAtY vbox y = go (vbox ^. boxContent) y 0
       else go hboxes (y - hbox ^. boxHeight) (succ n)
 
 -- If we put Characters in boxes then we could perhaps generalize this
-indexAtX :: FontMetrics -> HBox [TextBox] -> Double -> Int
+indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> Int
 indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
     indexAtX' :: [Char] -> Double -> Int -> Int
@@ -374,14 +395,19 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
       in if x < cWidth
          then i
          else indexAtX' cs (x - cWidth) (succ i)
-    go :: [TextBox] -> Double -> Int -> Int
+    go :: [AtomBox] -> Double -> Int -> Int
     go [] x i = i
-    go (box:boxes) x i
-      | x < (box ^. boxWidth) =
-          indexAtX' (Text.unpack (box ^. boxContent)) x i
-      | otherwise = go boxes (x - box ^. boxWidth) (i + Text.length (box ^. boxContent))
+    go (box:boxes) x i =
+      case box ^. boxContent of
+        (RichText txt)
+         | x < (box ^. boxWidth) ->
+            indexAtX' (Text.unpack txt) x i
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + Text.length txt)
+        (Img img)
+         | x < (box ^. boxWidth) -> i
+         | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
 
-indexAtPos :: FontMetrics -> VBox [HBox [TextBox]] -> (Double, Double) -> Maybe Int
+indexAtPos :: FontMetrics -> VBox [HBox [AtomBox]] -> (Double, Double) -> Maybe Int
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
    Nothing -> Nothing
@@ -390,7 +416,7 @@ indexAtPos fm vbox (x,y) =
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumPrevious vboxes = sum (map sumLine vboxes)
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
-     sumLine vbox = sum (map (\box -> Text.length (box ^. boxContent)) (vbox ^. boxContent))
+     sumLine vbox = sum (map (\box -> atomLength (box ^. boxContent)) (vbox ^. boxContent))
 
 getFontMetric :: JSElement -> Char -> IO (Char, (Double, Double))
 getFontMetric measureElm c =
@@ -412,6 +438,7 @@ getSelectionData =
                                  , _selectionString = JS.unpack txt
                                  , _rangeCount = c
                                  }
+
 {-
 foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plain\")" getClipboardData ::
         ClipboardEventObject -> IO JS.JSString
@@ -426,6 +453,7 @@ update' action model'' =
                          , _selectionData = mSelectionData
                          }
      case action of
+      AddImage       -> pure (handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model, Nothing)
       CopyA ceo      -> do cd <- clipboardData ceo
                            setDataTransferData cd "text/plain" "Boo-yeah!"
                            pure (model & debugMsg .~ Just "copy", Nothing)
@@ -433,10 +461,10 @@ update' action model'' =
 --                       txt2 <- getClipboardData ceo
 --                       js_alert txt2
                        pure (model & debugMsg .~ Just (textFromJSString txt), Nothing)
-      KeyPressed c  -> pure (handleAction (InsertChar c) model, Nothing)
+      KeyPressed c  -> pure (handleAction (InsertAtom (RichChar c)) model, Nothing)
       KeyDowned c -- handle \r and \n ?
-        | c == 8    -> pure (handleAction DeleteChar model, Nothing)
-        | c == 32   -> pure (handleAction (InsertChar ' ') model, Nothing)
+        | c == 8    -> pure (handleAction DeleteAtom model, Nothing)
+        | c == 32   -> pure (handleAction (InsertAtom (RichChar ' ')) model, Nothing) -- seems obsolete?
         | otherwise -> pure (model, Nothing)
       MouseClick e ->
         do elem <- target e
@@ -521,23 +549,26 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
 
 -}
 
-renderTextBox :: TextBox -> HTML Action
+renderAtomBox :: AtomBox -> HTML Action
 -- renderTextBox box = CDATA True (box ^. boxContent)
-renderTextBox box = [hsx| <span><% nbsp $ box ^. boxContent %></span> |]
+renderAtomBox box =
+  case box ^. boxContent of
+    (RichText txt) -> [hsx| <span><% nbsp txt %></span> |]
+    (Img img)      -> [hsx| <img src=(img ^. imageUrl) /> |]
   where
     nbsp = Text.replace " " (Text.singleton '\160')
 
-renderTextBoxes' :: HBox [TextBox] -> HTML Action
-renderTextBoxes' box =
-    [hsx| <div class=("line"::Text)><% map renderTextBox (box ^. boxContent)  %></div> |]
+renderAtomBoxes' :: HBox [AtomBox] -> HTML Action
+renderAtomBoxes' box =
+    [hsx| <div class=("line"::Text)><% map renderAtomBox (box ^. boxContent)  %></div> |]
 --  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
 
-renderTextBoxes :: VBox [HBox [TextBox]] -> HTML Action
-renderTextBoxes lines =
-  [hsx| <div class="lines"><% map renderTextBoxes' (lines ^. boxContent) %></div> |]
+renderAtomBoxes :: VBox [HBox [AtomBox]] -> HTML Action
+renderAtomBoxes lines =
+  [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
 
-linesToHTML :: VBox [HBox [TextBox]] -> HTML Action
-linesToHTML lines = renderTextBoxes lines
+linesToHTML :: VBox [HBox [AtomBox]] -> HTML Action
+linesToHTML lines = renderAtomBoxes lines
 {-
 textToHTML :: FontMetrics -> Double -> Int -> Text -> HTML Action
 textToHTML fm maxWidth caret txt =
@@ -547,7 +578,7 @@ textToHTML fm maxWidth caret txt =
    renderTextBoxes (layoutBoxes maxWidth (0, boxes'))
 -}
 
-renderDoc :: VBox [HBox [TextBox]] -> HTML Action
+renderDoc :: VBox [HBox [AtomBox]] -> HTML Action
 renderDoc lines =
   [hsx|
     <div data-path="root">
@@ -567,11 +598,14 @@ renderDoc lines =
        (_:cs) -> b : rlines cs
 
 
-indexToPosTxt :: Int -> FontMetrics -> TextBox -> Maybe Double
-indexToPosTxt index fm box
-  | Text.length (box ^. boxContent) < index = Nothing
-  | otherwise =
-      Just $ Text.foldr sumWidth 0 (Text.take index (box ^. boxContent))
+indexToPosAtom :: Int -> FontMetrics -> AtomBox -> Maybe Double
+indexToPosAtom index fm box =
+  case box ^. boxContent of
+    (RichText txt)
+      | Text.length txt < index -> Nothing
+      | otherwise ->
+        Just $ Text.foldr sumWidth 0 (Text.take index txt)
+    (Img img) -> Just 0 -- box ^. boxWidth
   where
     sumWidth c acc =
       case Map.lookup c fm of
@@ -585,6 +619,7 @@ indexToPos :: Int
            -> Maybe (Double, Double)
 indexToPos i model = go (model ^. layout ^. boxContent) i (0,0)
   where
+
     go [] _ _ = Nothing
     go (hbox:hboxes) i curPos =
       case go' (hbox ^. boxContent) i curPos of
@@ -592,12 +627,13 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0)
        (Left (i', (x,y))) ->
          go hboxes i' (0, y + hbox ^. boxHeight)
 
+--     go' :: [AtomBox] -> Int -> Double -> Either (Int, Double) (Maybe Double)
     go' [] i curPos = Left (i, curPos)
     go' _ 0 curPos = Right (Just curPos)
     go' (box:boxes) i (x,y) =
-      if i > Text.length (box ^. boxContent)
-         then go' boxes (i - Text.length (box ^. boxContent)) (x + box ^. boxWidth, y)
-         else case indexToPosTxt i (model ^. fontMetrics) box of
+      if i > atomLength (box ^. boxContent)
+         then go' boxes (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y)
+         else case indexToPosAtom i (model ^. fontMetrics) box of
                Nothing   -> Right Nothing
                (Just x') -> Right (Just (x + x', y))
 
@@ -615,6 +651,7 @@ view' model =
       clickEvent    = Event Click    (\e -> pure (MouseClick e))
       copyEvent     = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
       pasteEvent    = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
+      addImage      = Event Click    (\e -> pure AddImage)
   in
          ([hsx|
            <div>
@@ -624,47 +661,49 @@ view' model =
 --            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
+            <div style="float: right;">
+             <h1>Debug</h1>
+             <p>debugMsg: <% show (model ^. debugMsg) %></p>
+             <p>mousePos: <% show (model ^. mousePos) %></p>
+             <p>editorPos: <% let mpos = model ^. editorPos in
+                     case mpos of
+                      Nothing -> "(,)"
+                      (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+             <p><% let mepos = model ^. editorPos in
+                     case mepos of
+                      Nothing -> "(,)"
+                      (Just epos) ->
+                        case model ^. mousePos of
+                             Nothing -> "(,)"
+                             (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
+             <p>targetPos: <% let mpos = model ^. targetPos in
+                     case mpos of
+                      Nothing -> "(,)"
+                      (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
+             <p>Document: <% show (model ^. document) %></p>
+             <p>Patches: <% show (model  ^. patches) %></p>
+             <p>Current Patch: <% show (model  ^. currentEdit) %></p>
+             <p>Index: <% show (model ^. index) %></p>
+             <p>Caret: <% show (model ^. caret) %></p>
+             <% case model ^. selectionData of
+                  Nothing -> <p>No Selection</p>
+                  (Just selectionData) ->
+                    <div>
+                     <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
+                     <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
+                     <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                    </div>
+             %>
+            </div>
 
             <h1>Editor</h1>
             <input type="text" value="" [copyEvent, pasteEvent, copyEvent] />
-            <div id="editor" tabindex="1" style="outline: 0; height: 200px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
+            <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
-            <h1>Debug</h1>
-            <p>debugMsg: <% show (model ^. debugMsg) %></p>
-            <p>mousePos: <% show (model ^. mousePos) %></p>
-            <p>editorPos: <% let mpos = model ^. editorPos in
-                    case mpos of
-                     Nothing -> "(,)"
-                     (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-            <p><% let mepos = model ^. editorPos in
-                    case mepos of
-                     Nothing -> "(,)"
-                     (Just epos) ->
-                       case model ^. mousePos of
-                            Nothing -> "(,)"
-                            (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
-            <p>targetPos: <% let mpos = model ^. targetPos in
-                    case mpos of
-                     Nothing -> "(,)"
-                     (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-            <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-
-            <p>Document: <% show (model ^. document) %></p>
-            <p>Patches: <% show (model  ^. patches) %></p>
-            <p>Current Patch: <% show (model  ^. currentEdit) %></p>
-            <p>Index: <% show (model ^. index) %></p>
-            <p>Caret: <% show (model ^. caret) %></p>
-            <% case model ^. selectionData of
-                 Nothing -> <p>No Selection</p>
-                 (Just selectionData) ->
-                   <div>
-                    <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
-                    <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
-                    <p>Selection: toString()=<% selectionData ^. selectionString %></p>
-                   </div>
-            %>
+            <button [addImage]>Add Image</button>
            </div>
           |], [])
 
@@ -693,4 +732,6 @@ editorMUV =
 main :: IO ()
 main =
   muv editorMUV id (Just UpdateMetrics)
+
+-- main = pure ()
 
