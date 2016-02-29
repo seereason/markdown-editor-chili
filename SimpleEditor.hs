@@ -443,6 +443,10 @@ getSelectionData =
 foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plain\")" getClipboardData ::
         ClipboardEventObject -> IO JS.JSString
 -}
+
+foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
+         JSElement -> IO ()
+
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
 update' action model'' =
   do (Just doc)        <- currentDocument
@@ -452,6 +456,7 @@ update' action model'' =
      let model = model'' { _editorPos = Just rect
                          , _selectionData = mSelectionData
                          }
+     js_focus editorElem
      case action of
       AddImage       -> pure (handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model, Nothing)
       CopyA ceo      -> do cd <- clipboardData ceo
@@ -605,44 +610,64 @@ indexToPosAtom index fm box =
       | Text.length txt < index -> Nothing
       | otherwise ->
         Just $ Text.foldr sumWidth 0 (Text.take index txt)
-    (Img img) -> Just 0 -- box ^. boxWidth
+    (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
   where
     sumWidth c acc =
       case Map.lookup c fm of
         Just (w, _) -> acc + w
         Nothing -> acc
 
--- | given a character index, calculate its (x,y) coordinates in the editor
+-- | given a character index, calculate its (left, top, height) coordinates in the editor
 --
 indexToPos :: Int
            -> Model
-           -> Maybe (Double, Double)
-indexToPos i model = go (model ^. layout ^. boxContent) i (0,0)
+           -> Maybe (Double, Double, Double)
+indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,0)
   where
-
-    go [] _ _ = Nothing
+    -- go over the lines
+    go [] _ _  = Nothing
     go (hbox:hboxes) i curPos =
-      case go' (hbox ^. boxContent) i curPos of
-       (Right curPos) -> curPos
-       (Left (i', (x,y))) ->
-         go hboxes i' (0, y + hbox ^. boxHeight)
+      -- walk over thecurrent line
+      case go' (hbox ^. boxContent) (hbox ^. boxHeight) i curPos of
+       -- if the position is in current line, we are done
+       (Right curPos') -> curPos'
+       -- otherwise add the height of that line and start
+       -- looking in the next line
+       (Left (i', (x,y,height))) ->
+         go hboxes i' (0, y + hbox ^. boxHeight, height)
 
+    -- go over the atoms in a line
 --     go' :: [AtomBox] -> Int -> Double -> Either (Int, Double) (Maybe Double)
-    go' [] i curPos = Left (i, curPos)
-    go' _ 0 curPos = Right (Just curPos)
-    go' (box:boxes) i (x,y) =
+    go' [] _ i curPos = Left (i, curPos)
+    go' _ _ 0 curPos = Right (Just curPos)
+    go' (box:boxes) lineHeight i (x,y,height) =
+      -- if the index is greater than the length of the next atom
       if i > atomLength (box ^. boxContent)
-         then go' boxes (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y)
+         -- subtract length of next atom, add width, update height, check next atom
+         then go' boxes lineHeight (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y, box ^. boxHeight)
+         -- if we found the atom we are looking for, look for x position within the atom
          else case indexToPosAtom i (model ^. fontMetrics) box of
                Nothing   -> Right Nothing
-               (Just x') -> Right (Just (x + x', y))
+               (Just x') ->
+                 let boxForHeight = box
+                     {-
+                       case boxes of
+                         (box':_) -> box'
+                         _        -> box
+-}
+                 in Right (Just (x + x', y + (lineHeight - (boxForHeight ^. boxHeight)), boxForHeight ^. boxHeight))
 
-caretPos :: Model -> Maybe (Double, Double) -> [KV Text Text]
+caretPos :: Model -> Maybe (Double, Double, Double) -> [KV Text Text]
 caretPos model Nothing = []
-caretPos model (Just (x, y)) =
+caretPos model (Just (x, y, height)) =
   case model ^. editorPos of
    Nothing -> []
-   (Just ep) -> ["style" := ("top: " <> (Text.pack $ show (y{- + (rectTop ep) -})) <> "px; left: " <> (Text.pack $ show (x {- + (rectLeft ep) -}) <> "px;"))]
+   (Just ep) -> ["style" := ("top: "        <> (Text.pack $ show y)      <>
+                             "px; left: "   <> (Text.pack $ show x)      <>
+                             "px; height: " <> (Text.pack $ show height) <>
+                             "px;"
+                             )
+                ]
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
@@ -699,7 +724,7 @@ view' model =
 
             <h1>Editor</h1>
             <input type="text" value="" [copyEvent, pasteEvent, copyEvent] />
-            <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
+            <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
