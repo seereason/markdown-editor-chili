@@ -25,13 +25,14 @@ import Control.Monad (when)
 import Data.Char (chr)
 import qualified Data.JSString as JS
 import Data.JSString.Text (textToJSString, textFromJSString)
+import Data.List (findIndex, groupBy, null, splitAt)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, maybe)
 import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import qualified Data.Patch as Patch
-import Data.Text (Text, findIndex)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
@@ -41,17 +42,65 @@ import Servant.Common.BaseUrl
 import Servant.Common.Req (Req(..))
 import Language.Haskell.HSX.QQ (hsx)
 import Web.ISO.HSX
-import Web.ISO.Types
+import Web.ISO.Types hiding (Context2D(Font))
 
 -- type Document = Vector Char -- [Edit Char]
 type Index = Int
-type FontMetrics = Map Char (Double, Double)
+type FontMetrics = Map RichChar (Double, Double)
+
+data FontStyle
+  = Normal
+  | Bold
+  | Italic
+  deriving (Eq, Ord, Show)
+
+data Font = Font
+ { _fontStyle :: FontStyle
+ , _fontSize  :: Double
+ }
+ deriving (Eq, Ord, Show)
+
+data RichChar = RichChar
+  { _font :: Font
+  , _char :: Char
+  }
+  deriving (Eq, Ord, Show)
+makeLenses ''RichChar
+
+
+-- | a block of non-breaking Text
+--
+-- We have a list of [(Font,Text)]. This allows us to do things like
+-- have the font style change in the middle of a word with out
+-- introducing the possibility that the layout engine will insert a
+-- line-break in the middle of the world.
+data RichText = RichText
+  { _text :: [(Font, Text)]
+  }
+  deriving (Eq, Show)
+makeLenses ''RichText
+
+richTextLength :: RichText -> Int
+richTextLength (RichText txts) = sum (map (Text.length . snd) txts)
+
+richCharsToRichText :: [RichChar] -> RichText
+richCharsToRichText []    = RichText []
+richCharsToRichText chars =
+  RichText $ map flatten $ groupBy (\(RichChar f _) (RichChar f' _) -> f == f') chars
+  where
+    flatten :: [RichChar] -> (Font, Text)
+    flatten chars = ((head chars) ^. font, Text.pack (map _char chars))
+
+richTextToRichChars :: RichText -> [RichChar]
+richTextToRichChars (RichText texts) =
+  concatMap (\(font, txt) -> [ RichChar font c | c <- Text.unpack txt ]) texts
 
 data Box c a = Box
   { _boxWidth     :: Double
   , _boxHeight    :: Double
   , _boxContent   :: a
   }
+  deriving (Eq, Show)
 makeLenses ''Box
 
 data Image = Image
@@ -63,21 +112,21 @@ data Image = Image
 makeLenses ''Image
 
 data Atom
-  = RichChar Char
-  | RichText Text
+  = RC RichChar
+  | RT RichText
   | Img Image
     deriving (Eq, Show)
 
 isRichChar :: Atom -> Bool
-isRichChar (RichChar {}) = True
+isRichChar (RC {}) = True
 isRichChar _             = False
 
-unRichChar :: Atom -> Char
-unRichChar (RichChar c) = c
+unRichChar :: Atom -> RichChar
+unRichChar (RC rc) = rc
 
 atomLength :: Atom -> Int
-atomLength (RichChar {})  = 1
-atomLength (RichText txt) = Text.length txt
+atomLength (RC {})  = 1
+atomLength (RT (RichText txts)) = sum (map (Text.length . snd) txts)
 atomLength (Img {})       = 1
 
 
@@ -144,7 +193,8 @@ data Model = Model
   , _editState   :: EditState
   , _index       :: Index -- ^ current index for patch edit operations
   , _caret       :: Index -- ^ position of caret
-  , _fontMetrics :: Map Char (Double, Double)
+  , _fontMetrics :: FontMetrics
+  , _currentFont :: Font
   , _measureElem :: Maybe JSElement
   , _debugMsg    :: Maybe Text
   , _mousePos    :: Maybe (Double, Double)
@@ -206,22 +256,22 @@ calcSizes lines =
 --
 -- Note that the Text will be 'unbreakable'. If you want to be able to
 -- break on whitespace, first use 'textToWords'.
-textToBox :: FontMetrics -> Text -> AtomBox
+textToBox :: FontMetrics -> RichText -> AtomBox
 textToBox fm input
-  | Text.null input = Box { _boxWidth     = 0
-                          , _boxHeight    = 0
-                          , _boxContent   = RichText input
-                          }
+  | null (input ^. text) = Box { _boxWidth  = 0
+                               , _boxHeight    = 0
+                               , _boxContent   = RT input
+                               }
   | otherwise =
-      Box { _boxWidth     = Text.foldr (\c w -> w + getWidth fm c) 0 input
-          , _boxHeight    = getHeight fm (Text.head input)
-          , _boxContent   = RichText input
+      Box { _boxWidth     = foldr (\(f,txt) w' -> Text.foldr (\c w -> w + getWidth fm (RichChar f c)) w' txt) 0 (input ^. text)
+          , _boxHeight    = maximum (map (getHeight fm) [ RichChar f (Text.head txt) | (f, txt) <- input ^. text ])
+          , _boxContent   = RT input
           }
   where
-    getWidth, getHeight :: FontMetrics -> Char -> Double
+    getWidth, getHeight :: FontMetrics -> RichChar -> Double
     getWidth  fm c = maybe 0 fst (Map.lookup c fm)
     getHeight fm c = maybe 0 snd (Map.lookup c fm)
-
+{-
 -- | similar to words except whitespace is preserved at the end of a word
 textToWords :: Text -> [Text]
 textToWords txt
@@ -233,6 +283,18 @@ textToWords txt
           0 -> [txt]
           _ -> let (word, rest) = Text.splitAt (whiteIndex + charIndex) txt
                in (word : textToWords rest)
+-}
+
+-- | similar to words except whitespace is preserved at the end of a word
+richCharsToWords :: [RichChar] -> [[RichChar]]
+richCharsToWords [] = []
+richCharsToWords txt =
+      let whiteIndex   = fromMaybe 0 $ findIndex (\rc -> (rc ^. char) ==' ') txt
+          charIndex    = fromMaybe 0 $ findIndex (\rc -> (rc ^. char) /= ' ') (drop whiteIndex txt)
+      in case whiteIndex + charIndex of
+          0 -> [txt]
+          _ -> let (word, rest) = splitAt (whiteIndex + charIndex) txt
+               in (word : richCharsToWords rest)
 
 -- | FIXME: possibly not tail recursive -- should probably use foldr or foldl'
 layoutBoxes :: Double -> (Double, [Box c a]) -> [[Box c a]]
@@ -259,10 +321,10 @@ boxify fm v
   | Vector.null v = []
   | otherwise =
     case (Vector.head v) of
-      RichChar {} ->
+      RC {} ->
         case Vector.span isRichChar v of
           (richChars, rest) ->
-            (map (textToBox fm) $ textToWords $ Text.pack (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
+            (map (textToBox fm) $ map richCharsToRichText $ richCharsToWords $ (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
       atom@(Img img) ->
         (Box (img ^. imageWidth) (img ^. imageHeight) atom) : boxify fm (Vector.tail v)
 
@@ -388,7 +450,7 @@ lineAtY vbox y = go (vbox ^. boxContent) y 0
 indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> Int
 indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
-    indexAtX' :: [Char] -> Double -> Int -> Int
+    indexAtX' :: [RichChar] -> Double -> Int -> Int
     indexAtX' [] x i = i
     indexAtX' (c:cs) x i =
       let cWidth =  fst $ fromJust $ Map.lookup c fm
@@ -399,10 +461,10 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
     go [] x i = i
     go (box:boxes) x i =
       case box ^. boxContent of
-        (RichText txt)
+        (RT txt)
          | x < (box ^. boxWidth) ->
-            indexAtX' (Text.unpack txt) x i
-         | otherwise -> go boxes (x - box ^. boxWidth) (i + Text.length txt)
+            indexAtX' (richTextToRichChars txt) x i
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + richTextLength txt)
         (Img img)
          | x < (box ^. boxWidth) -> i
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
@@ -418,14 +480,15 @@ indexAtPos fm vbox (x,y) =
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumLine vbox = sum (map (\box -> atomLength (box ^. boxContent)) (vbox ^. boxContent))
 
-getFontMetric :: JSElement -> Char -> IO (Char, (Double, Double))
-getFontMetric measureElm c =
+-- | FIXME
+getFontMetric :: JSElement -> RichChar -> IO (RichChar, (Double, Double))
+getFontMetric measureElm rc@(RichChar _ c) =
   do setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
      domRect <- getBoundingClientRect measureElm
      -- FIXME: width and height are not official properties of DOMClientRect
      let w = width domRect / 100
          h = height domRect
-     pure (c, (w, h))
+     pure (rc, (w, h))
 
 getSelectionData :: IO (Maybe SelectionData)
 getSelectionData =
@@ -444,8 +507,8 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
         ClipboardEventObject -> IO JS.JSString
 -}
 
-foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
-         JSElement -> IO ()
+-- foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
+--         JSElement -> IO ()
 
 update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
 update' action model'' =
@@ -466,10 +529,10 @@ update' action model'' =
 --                       txt2 <- getClipboardData ceo
 --                       js_alert txt2
                        pure (model & debugMsg .~ Just (textFromJSString txt), Nothing)
-      KeyPressed c  -> pure (handleAction (InsertAtom (RichChar c)) model, Nothing)
+      KeyPressed c  -> pure (handleAction (InsertAtom (RC (RichChar (model ^. currentFont) c))) model, Nothing)
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> pure (handleAction DeleteAtom model, Nothing)
-        | c == 32   -> pure (handleAction (InsertAtom (RichChar ' ')) model, Nothing) -- seems obsolete?
+        | c == 32   -> pure (handleAction (InsertAtom (RC (RichChar (model ^. currentFont) ' '))) model, Nothing) -- seems obsolete?
         | otherwise -> pure (model, Nothing)
       MouseClick e ->
         do elem <- target e
@@ -511,8 +574,8 @@ update' action model'' =
             (Just me) -> doMetrics model me
         where
           doMetrics model me =
-            do metrics <- mapM (getFontMetric me) [' '..'~']
-               pure $ (model & fontMetrics .~ (Map.fromList metrics) & debugMsg .~ (Just $ Text.pack $ show metrics) , Nothing)
+            do metrics <- mapM (getFontMetric me) [ RichChar (model ^. currentFont) c | c <- [' ' .. '~']]
+               pure $ (model & fontMetrics .~ (Map.fromList metrics) {- & debugMsg .~ (Just $ Text.pack $ show metrics) -}, Nothing)
 
 {-
 textToBox :: FontMetrics -> Text -> TextBox
@@ -554,18 +617,20 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
 
 -}
 
-renderAtomBox :: AtomBox -> HTML Action
+renderAtomBox :: AtomBox -> [HTML Action]
 -- renderTextBox box = CDATA True (box ^. boxContent)
 renderAtomBox box =
   case box ^. boxContent of
-    (RichText txt) -> [hsx| <span><% nbsp txt %></span> |]
-    (Img img)      -> [hsx| <img src=(img ^. imageUrl) /> |]
+    (RT (RichText txts)) -> map renderText txts
+    (Img img)       -> [[hsx| <img src=(img ^. imageUrl) /> |]]
   where
+    renderText :: (Font, Text) -> HTML Action
+    renderText (_, txt) = [hsx| <span><% nbsp txt %></span>   |]
     nbsp = Text.replace " " (Text.singleton '\160')
 
 renderAtomBoxes' :: HBox [AtomBox] -> HTML Action
 renderAtomBoxes' box =
-    [hsx| <div class=("line"::Text)><% map renderAtomBox (box ^. boxContent)  %></div> |]
+    [hsx| <div class=("line"::Text)><% concatMap renderAtomBox (box ^. boxContent)  %></div> |]
 --  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
 
 renderAtomBoxes :: VBox [HBox [AtomBox]] -> HTML Action
@@ -606,10 +671,10 @@ renderDoc lines =
 indexToPosAtom :: Int -> FontMetrics -> AtomBox -> Maybe Double
 indexToPosAtom index fm box =
   case box ^. boxContent of
-    (RichText txt)
-      | Text.length txt < index -> Nothing
+    (RT rt)
+      | richTextLength rt < index -> Nothing
       | otherwise ->
-        Just $ Text.foldr sumWidth 0 (Text.take index txt)
+        Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
     (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
   where
     sumWidth c acc =
@@ -668,7 +733,13 @@ caretPos model (Just (x, y, height)) =
                              "px;"
                              )
                 ]
-
+-- Event -> EIO Action
+{-
+<div> Click event
+ <button onClick=Increment>+</button>
+ <button onClick=Decrement>-</button>
+</div>
+-}
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
   let keyDownEvent  = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32) (preventDefault e) >> pure (KeyDowned (keyCode e)))
@@ -686,7 +757,7 @@ view' model =
 --            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
-            <div style="float: right;">
+            <div style="float: right; width: 600px;">
              <h1>Debug</h1>
              <p>debugMsg: <% show (model ^. debugMsg) %></p>
              <p>mousePos: <% show (model ^. mousePos) %></p>
@@ -723,12 +794,12 @@ view' model =
             </div>
 
             <h1>Editor</h1>
-            <input type="text" value="" [copyEvent, pasteEvent, copyEvent] />
+            <button [addImage]>Add Image</button>
             <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
             </div>
-            <button [addImage]>Add Image</button>
+
            </div>
           |], [])
 
@@ -741,6 +812,7 @@ editorMUV =
                        , _index       = 0
                        , _caret       = 0
                        , _fontMetrics = Map.empty
+                       , _currentFont = Font Normal 14.0
                        , _measureElem = Nothing
                        , _debugMsg    = Nothing
                        , _mousePos    = Nothing
