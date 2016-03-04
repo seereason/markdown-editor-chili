@@ -18,8 +18,8 @@
 {-# LANGUAGE PolyKinds #-}
 module Main where
 
-import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just)
-import Control.Lens.At (ix)
+import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set)
+import Control.Lens.At (at, ix)
 import Control.Lens.TH (makeLenses)
 import Control.Monad (when)
 import Data.Char (chr)
@@ -480,7 +480,7 @@ indexAtPos fm vbox (x,y) =
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumLine vbox = sum (map (\box -> atomLength (box ^. boxContent)) (vbox ^. boxContent))
 
--- | FIXME
+-- | FIXME - font size, style, etc
 getFontMetric :: JSElement -> RichChar -> IO (RichChar, (Double, Double))
 getFontMetric measureElm rc@(RichChar _ c) =
   do setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
@@ -489,6 +489,8 @@ getFontMetric measureElm rc@(RichChar _ c) =
      let w = width domRect / 100
          h = height domRect
      pure (rc, (w, h))
+
+
 
 getSelectionData :: IO (Maybe SelectionData)
 getSelectionData =
@@ -529,10 +531,23 @@ update' action model'' =
 --                       txt2 <- getClipboardData ceo
 --                       js_alert txt2
                        pure (model & debugMsg .~ Just (textFromJSString txt), Nothing)
-      KeyPressed c  -> pure (handleAction (InsertAtom (RC (RichChar (model ^. currentFont) c))) model, Nothing)
+      KeyPressed c  ->
+        do let rc = RichChar (model ^. currentFont) c
+           model' <- case Map.lookup rc (model ^. fontMetrics) of
+                 Nothing -> do (_, metric) <- getFontMetric (fromJust $ model ^. measureElem) rc
+                               pure $ set (fontMetrics . at rc) (Just metric) model
+--                               pure $ (model & fontMetrics) & at rc .~ (Just metric)
+                 (Just _) -> pure model
+           pure (handleAction (InsertAtom (RC rc)) model', Nothing)
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> pure (handleAction DeleteAtom model, Nothing)
-        | c == 32   -> pure (handleAction (InsertAtom (RC (RichChar (model ^. currentFont) ' '))) model, Nothing) -- seems obsolete?
+        | c == 32   -> do let rc = RichChar (model ^. currentFont) ' '
+                          model' <- case Map.lookup rc (model ^. fontMetrics) of
+                            Nothing ->
+                              do (_, metric) <- getFontMetric (fromJust $ model ^. measureElem) rc
+                                 pure $ set (fontMetrics . at rc) (Just metric) model
+                            (Just _) -> pure model
+                          pure (handleAction (InsertAtom (RC (RichChar (model' ^. currentFont) ' '))) model', Nothing) -- seems obsolete?
         | otherwise -> pure (model, Nothing)
       MouseClick e ->
         do elem <- target e
@@ -573,10 +588,11 @@ update' action model'' =
                      doMetrics model' me
             (Just me) -> doMetrics model me
         where
-          doMetrics model me =
+          doMetrics model me = pure (model, Nothing)
+          {-
             do metrics <- mapM (getFontMetric me) [ RichChar (model ^. currentFont) c | c <- [' ' .. '~']]
                pure $ (model & fontMetrics .~ (Map.fromList metrics) {- & debugMsg .~ (Just $ Text.pack $ show metrics) -}, Nothing)
-
+-}
 {-
 textToBox :: FontMetrics -> Text -> TextBox
 textToBox fm input
@@ -757,7 +773,7 @@ view' model =
 --            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
-            <div style="float: right; width: 600px;">
+            <div style="float: right; width: 800px;">
              <h1>Debug</h1>
              <p>debugMsg: <% show (model ^. debugMsg) %></p>
              <p>mousePos: <% show (model ^. mousePos) %></p>
