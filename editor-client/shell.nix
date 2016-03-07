@@ -4,7 +4,9 @@ let
 
   inherit (nixpkgs) pkgs;
 
-  f = { mkDerivation, aeson, base, bytestring, ghcjs-base, hsx2hs, http-types, lens, stdenv, text, time, isomaniac, servant, servant-isomaniac, patches-vector }:
+  f = { mkDerivation, aeson, base, bytestring, ghcjs-base, hsx2hs, http-types, lens, stdenv,
+        text, time, isomaniac, servant, servant-isomaniac, patches-vector
+      }:
       mkDerivation {
         pname = "markdown-editor";
         version = "0.1.0.0";
