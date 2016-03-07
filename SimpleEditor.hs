@@ -46,19 +46,66 @@ import Web.ISO.Types hiding (Context2D(Font))
 
 -- type Document = Vector Char -- [Edit Char]
 type Index = Int
-type FontMetrics = Map RichChar (Double, Double)
+
 
 data FontStyle
   = Normal
-  | Bold
   | Italic
+  | Oblique
   deriving (Eq, Ord, Show)
 
+data FontWeight
+  = FW100
+  | FW200
+  | FW300
+  | FW400
+  | FW500
+  | FW600
+  | FW700
+  | FW800
+  | FW900
+  deriving (Eq, Ord, Show)
+
+fontWeightJS :: FontWeight -> JS.JSString
+fontWeightJS weight =
+  case weight of
+    FW100 -> "100"
+    FW200 -> "200"
+    FW300 -> "300"
+    FW400 -> "400"
+    FW500 -> "500"
+    FW600 -> "600"
+    FW700 -> "700"
+    FW800 -> "800"
+    FW900 -> "900"
+
+fontWeightText :: FontWeight -> Text
+fontWeightText weight =
+  case weight of
+    FW100 -> "100"
+    FW200 -> "200"
+    FW300 -> "300"
+    FW400 -> "400"
+    FW500 -> "500"
+    FW600 -> "600"
+    FW700 -> "700"
+    FW800 -> "800"
+    FW900 -> "900"
+
 data Font = Font
- { _fontStyle :: FontStyle
- , _fontSize  :: Double
+ { _fontWeight :: FontWeight
+ , _fontSize   :: Double
+ , _fontStyle  :: FontStyle
  }
  deriving (Eq, Ord, Show)
+makeLenses ''Font
+
+defaultFont :: Font
+defaultFont =
+  Font { _fontWeight = FW400
+       , _fontSize   = 16
+       , _fontStyle  = Normal
+       }
 
 data RichChar = RichChar
   { _font :: Font
@@ -67,6 +114,7 @@ data RichChar = RichChar
   deriving (Eq, Ord, Show)
 makeLenses ''RichChar
 
+type FontMetrics = Map RichChar (Double, Double)
 
 -- | a block of non-breaking Text
 --
@@ -215,6 +263,9 @@ data Action
     | CopyA ClipboardEventObject
     | PasteA JS.JSString
     | AddImage
+    | IncreaseFontSize
+    | DecreaseFontSize
+    | ToggleBold
     deriving Show
 
 data EditAction
@@ -482,15 +533,16 @@ indexAtPos fm vbox (x,y) =
 
 -- | FIXME - font size, style, etc
 getFontMetric :: JSElement -> RichChar -> IO (RichChar, (Double, Double))
-getFontMetric measureElm rc@(RichChar _ c) =
-  do setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
+getFontMetric measureElm rc@(RichChar font c) =
+  do setStyle measureElm "font-size"   (JS.pack $ (show $ font ^. fontSize) ++ "px")
+     setStyle measureElm "font-weight" (fontWeightJS $ font ^. fontWeight)
+     setStyle measureElm "font-style"  (JS.pack $ show $ font ^. fontStyle)
+     setInnerHTML measureElm (JS.pack $ replicate 100 (if c == ' ' then '\160' else c))
      domRect <- getBoundingClientRect measureElm
      -- FIXME: width and height are not official properties of DOMClientRect
      let w = width domRect / 100
          h = height domRect
      pure (rc, (w, h))
-
-
 
 getSelectionData :: IO (Maybe SelectionData)
 getSelectionData =
@@ -524,6 +576,9 @@ update' action model'' =
      js_focus editorElem
      case action of
       AddImage       -> pure (handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model, Nothing)
+      IncreaseFontSize -> pure (model & (currentFont . fontSize) %~ succ, Nothing)
+      DecreaseFontSize -> pure (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
+      ToggleBold       -> pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
       CopyA ceo      -> do cd <- clipboardData ceo
                            setDataTransferData cd "text/plain" "Boo-yeah!"
                            pure (model & debugMsg .~ Just "copy", Nothing)
@@ -633,6 +688,16 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
 
 -}
 
+fontToStyle :: Font -> Text
+fontToStyle font =
+  "font-size: " <> Text.pack (show $ font ^. fontSize) <>
+  "px; font-weight: " <> (fontWeightText $ font ^. fontWeight) <>
+  "; font-style: " <> (case (font ^. fontStyle) of
+                          Normal  -> "normal;"
+                          Italic  -> "italic;"
+                          Oblique -> "oblique;")
+
+
 renderAtomBox :: AtomBox -> [HTML Action]
 -- renderTextBox box = CDATA True (box ^. boxContent)
 renderAtomBox box =
@@ -641,7 +706,7 @@ renderAtomBox box =
     (Img img)       -> [[hsx| <img src=(img ^. imageUrl) /> |]]
   where
     renderText :: (Font, Text) -> HTML Action
-    renderText (_, txt) = [hsx| <span><% nbsp txt %></span>   |]
+    renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
     nbsp = Text.replace " " (Text.singleton '\160')
 
 renderAtomBoxes' :: HBox [AtomBox] -> HTML Action
@@ -764,6 +829,9 @@ view' model =
       copyEvent     = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
       pasteEvent    = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
       addImage      = Event Click    (\e -> pure AddImage)
+      increaseFontSize = Event Click (\e -> pure IncreaseFontSize)
+      decreaseFontSize = Event Click (\e -> pure DecreaseFontSize)
+      toggleBold       = Event Click (\e -> pure ToggleBold)
   in
          ([hsx|
            <div>
@@ -811,6 +879,9 @@ view' model =
 
             <h1>Editor</h1>
             <button [addImage]>Add Image</button>
+            <button [increaseFontSize]>+</button>
+            <button [decreaseFontSize]>-</button>
+            <button [toggleBold]>Toggle Bold</button>
             <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
               <% renderDoc (model ^. layout) %>
@@ -828,7 +899,7 @@ editorMUV =
                        , _index       = 0
                        , _caret       = 0
                        , _fontMetrics = Map.empty
-                       , _currentFont = Font Normal 14.0
+                       , _currentFont = defaultFont
                        , _measureElem = Nothing
                        , _debugMsg    = Nothing
                        , _mousePos    = Nothing
