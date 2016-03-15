@@ -89,6 +89,13 @@ data Model = Model
   }
 makeLenses ''Model
 
+data BrowserIO = BrowserIO
+  { _bSelectionData :: Maybe SelectionData
+  , _bEditorPos     :: Maybe DOMClientRect
+  , _fontMetric    :: Maybe (Double, Double)
+  }
+makeLenses ''BrowserIO
+
 data Action
     = KeyPressed Char
     | KeyDowned Int
@@ -396,50 +403,104 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
         ClipboardEventObject -> IO JS.JSString
 -}
 
--- foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
---         JSElement -> IO ()
+foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
+        JSElement -> IO ()
 
-update' :: Action -> Model -> IO (Model, Maybe (ReqAction Action))
-update' action model'' =
+
+browserIO' :: Action
+           -> Model
+           -> IO BrowserIO
+browserIO' action model =
   do (Just doc)        <- currentDocument
      (Just editorElem) <- getElementById doc "editor"
      rect <- getBoundingClientRect editorElem
      mSelectionData <- getSelectionData
-     let model = model'' { _editorPos = Just rect
-                         , _selectionData = mSelectionData
-                         }
      js_focus editorElem
+     mFontMetric <- case action of
+                      (KeyPressed c) -> do
+                        let rc = RichChar (model ^. currentFont) c
+                        case Map.lookup rc (model ^. fontMetrics) of
+                          Nothing ->
+                            do (Just document) <- currentDocument
+                               (Just measureElem) <- getElementById document "measureElement"
+                               (_, metric) <- getFontMetric measureElem rc
+                               pure (Just metric)
+                          Just {} -> pure Nothing
+                      (KeyDowned c)
+                        | c == 32 -> do
+                          let rc = RichChar (model ^. currentFont) ' '
+                          case Map.lookup rc (model ^. fontMetrics) of
+                                Nothing ->
+                                  do (Just document) <- currentDocument
+                                     (Just measureElem) <- getElementById document "measureElement"
+                                     (_, metric) <- getFontMetric measureElem rc
+                                     pure (Just metric)
+                                Just {} -> pure Nothing
+                        | otherwise -> pure Nothing
+                      _ -> pure Nothing
+{-
+     mMeasureElem <- case action of
+                      UpdateMetrics ->
+                        do case model ^. measureElem of
+                             Nothing -> do
+                               (Just document) <- currentDocument
+                               getElementById document "measureElement"
+                             Just {} -> pure Nothing
+
+              case mme of
+                Nothing -> pure (model { _debugMsg = Just "Could not find measureElement" }, Nothing)
+                (Just me) ->
+                  do let model' = model & measureElem .~ (Just me)
+                     doMetrics model' me
+            (Just me) -> doMetrics model me
+-}
+     pure $ BrowserIO { _bSelectionData = mSelectionData
+                      , _bEditorPos     = Just rect
+                      , _fontMetric     = mFontMetric
+                      }
+
+update' :: Action
+        -> BrowserIO
+        -> Model
+        -> (Model, Maybe (ReqAction Action))
+update' action ioData model'' =
+  let model = model'' { _editorPos     = ioData ^. bEditorPos
+                      , _selectionData = ioData ^. bSelectionData
+                      }
+  in
      case action of
-      AddImage       -> pure (handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model, Nothing)
-      IncreaseFontSize -> pure (model & (currentFont . fontSize) %~ succ, Nothing)
-      DecreaseFontSize -> pure (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
-      ToggleBold       -> pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
-      CopyA ceo      -> do cd <- clipboardData ceo
-                           setDataTransferData cd "text/plain" "Boo-yeah!"
-                           pure (model & debugMsg .~ Just "copy", Nothing)
-      PasteA txt -> do -- txt <- getDataTransferData dt "text/plain"
+      AddImage         ->  (handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model, Nothing)
+      IncreaseFontSize ->  (model & (currentFont . fontSize) %~ succ, Nothing)
+      DecreaseFontSize ->  (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
+      ToggleBold       ->  (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
+
+      CopyA ceo      ->  -- cd <- clipboardData ceo
+                           -- setDataTransferData cd "text/plain" "Boo-yeah!"
+                         (model & debugMsg .~ Just "copy", Nothing)
+      PasteA txt ->  -- txt <- getDataTransferData dt "text/plain"
 --                       txt2 <- getClipboardData ceo
 --                       js_alert txt2
-                       pure (model & debugMsg .~ Just (textFromJSString txt), Nothing)
+                     (model & debugMsg .~ Just (textFromJSString txt), Nothing)
+
       KeyPressed c  ->
-        do let rc = RichChar (model ^. currentFont) c
-           model' <- case Map.lookup rc (model ^. fontMetrics) of
-                 Nothing -> do (_, metric) <- getFontMetric (fromJust $ model ^. measureElem) rc
-                               pure $ set (fontMetrics . at rc) (Just metric) model
---                               pure $ (model & fontMetrics) & at rc .~ (Just metric)
-                 (Just _) -> pure model
-           pure (handleAction (InsertAtom (RC rc)) model', Nothing)
+        let rc = RichChar (model ^. currentFont) c
+            model' = case ioData ^. fontMetric of
+                       Nothing       -> model
+                       (Just metric) -> set (fontMetrics . at rc) (Just metric) model
+        in (handleAction (InsertAtom (RC rc)) model', Nothing)
+
+      -- used for handling special cases like backspace, space
       KeyDowned c -- handle \r and \n ?
-        | c == 8    -> pure (handleAction DeleteAtom model, Nothing)
-        | c == 32   -> do let rc = RichChar (model ^. currentFont) ' '
-                          model' <- case Map.lookup rc (model ^. fontMetrics) of
-                            Nothing ->
-                              do (_, metric) <- getFontMetric (fromJust $ model ^. measureElem) rc
-                                 pure $ set (fontMetrics . at rc) (Just metric) model
-                            (Just _) -> pure model
-                          pure (handleAction (InsertAtom (RC (RichChar (model' ^. currentFont) ' '))) model', Nothing) -- seems obsolete?
-        | otherwise -> pure (model, Nothing)
-      MouseClick e ->
+        | c == 8    -> (handleAction DeleteAtom model, Nothing)
+        | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
+                           model' = case ioData ^. fontMetric of
+                             Nothing       -> model
+                             (Just metric) -> set (fontMetrics . at rc) (Just metric) model
+                       in (handleAction (InsertAtom (RC rc)) model', Nothing)
+        | otherwise -> (model, Nothing)
+
+      MouseClick e -> (model, Nothing)
+{-
         do elem <- target e
 {-
          (Just doc) <- currentDocument
@@ -465,8 +526,9 @@ update' action model'' =
 --              & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
 --                       & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
 --                , Nothing)
-
-      UpdateMetrics ->
+-}
+      UpdateMetrics -> (model, Nothing)
+        {-
         do case model ^. measureElem of
             Nothing -> do
               (Just document) <- currentDocument
@@ -483,6 +545,8 @@ update' action model'' =
             do metrics <- mapM (getFontMetric me) [ RichChar (model ^. currentFont) c | c <- [' ' .. '~']]
                pure $ (model & fontMetrics .~ (Map.fromList metrics) {- & debugMsg .~ (Just $ Text.pack $ show metrics) -}, Nothing)
 -}
+-}
+
 {-
 textToBox :: FontMetrics -> Text -> TextBox
 textToBox fm input
@@ -725,7 +789,7 @@ view' model =
            </div>
           |], [])
 
-editorMUV :: MUV IO Model Action (ReqAction Action)
+editorMUV :: MUV () Model BrowserIO Action (ReqAction Action)
 editorMUV =
   MUV { model  = Model { _document    = mempty
                        , _patches     = []
@@ -744,13 +808,14 @@ editorMUV =
                        , _maxWidth    = 300
                        , _selectionData = Nothing
                        }
+      , browserIO = browserIO'
       , update = update'
       , view   = view'
       }
 
 main :: IO ()
 main =
-  muv editorMUV id (Just UpdateMetrics)
+  muv editorMUV (Just UpdateMetrics)
 
 -- main = pure ()
 

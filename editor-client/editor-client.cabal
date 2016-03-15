@@ -9,7 +9,7 @@ category:            Web
 build-type:          Simple
 cabal-version:       >=1.10
 
-executable markdown-editor
+executable editor-client
   main-is:             SimpleEditor.hs
   other-extensions:    DataKinds, TypeFamilies, DeriveGeneric, TypeOperators, FlexibleInstances, OverloadedStrings, MultiParamTypeClasses, FlexibleContexts, UndecidableInstances, QuasiQuotes, RecordWildCards, ScopedTypeVariables, TemplateHaskell, ParallelListComp
   build-depends:       aeson,
@@ -20,7 +20,8 @@ executable markdown-editor
                        ghcjs-base,
                        hsx2hs,
                        http-types,
-                       isomaniac >= 0.3,
+                       http-api-data,
+                       isomaniac >= 0.2,
                        lens,
                        patches-vector,
                        servant,
