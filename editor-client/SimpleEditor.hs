@@ -88,7 +88,7 @@ data Model = Model
   , _caret         :: Index -- ^ position of caret
   , _fontMetrics   :: FontMetrics
   , _currentFont   :: Font
-  , _measureElem   :: Maybe JSElement
+--  , _measureElem   :: Maybe JSElement
   , _debugMsg      :: Maybe Text
   , _mousePos      :: Maybe (Double, Double)
   , _editorPos     :: Maybe DOMClientRect
@@ -103,7 +103,8 @@ makeLenses ''Model
 data BrowserIO = BrowserIO
   { _bSelectionData :: Maybe SelectionData
   , _bEditorPos     :: Maybe DOMClientRect
-  , _fontMetric    :: Maybe (Double, Double)
+  , _mTargetRect    :: Maybe DOMClientRect
+  , _fontMetric     :: Maybe (Double, Double)
   }
 makeLenses ''BrowserIO
 
@@ -161,13 +162,15 @@ calcSizes lines =
 
 -- | convert a 'Text' to a 'Box'.
 --
--- Note that the Text will be 'unbreakable'. If you want to be able to
--- break on whitespace, first use 'textToWords'.
-textToBox :: FontMetrics -> RichText -> AtomBox
+-- Note that the Text will be treated as 'unbreakable'. If you want to
+-- be able to break on whitespace, first use 'textToWords'.
+textToBox :: FontMetrics
+          -> RichText
+          -> AtomBox
 textToBox fm input
-  | null (input ^. text) = Box { _boxWidth  = 0
-                               , _boxHeight    = 0
-                               , _boxContent   = RT input
+  | null (input ^. text) = Box { _boxWidth   = 0
+                               , _boxHeight  = 0
+                               , _boxContent = RT input
                                }
   | otherwise =
       Box { _boxWidth     = foldr (\(f,txt) w' -> Text.foldr (\c w -> w + getWidth fm (RichChar f c)) w' txt) 0 (input ^. text)
@@ -222,8 +225,12 @@ textToLines fm maxWidth caret txt =
   let boxes = map (textToBox fm) (textToWords txt)
   in calcSizes $ layoutBoxes maxWidth (0, boxes)
 -}
+
+-- | 
 -- FIXME: should probably use a fold or something
-boxify :: FontMetrics -> Vector Atom -> [AtomBox]
+boxify :: FontMetrics
+       -> Vector Atom
+       -> [AtomBox]
 boxify fm v
   | Vector.null v = []
   | otherwise =
@@ -235,17 +242,21 @@ boxify fm v
       atom@(Img img) ->
         (Box (img ^. imageWidth) (img ^. imageHeight) atom) : boxify fm (Vector.tail v)
 
-atomsToLines :: FontMetrics -> Double -> Vector Atom -> VBox [HBox [AtomBox]]
+atomsToLines :: FontMetrics
+             -> Double       -- ^ maximum width of a line
+             -> Vector Atom
+             -> VBox [HBox [AtomBox]]
 atomsToLines fm maxWidth atoms =
   let boxes = boxify fm atoms -- map (textToBox fm) (textToWords txt)
   in calcSizes $ layoutBoxes maxWidth (0, boxes)
 
-insertChar :: Atom -> Model -> (Model, Maybe [WebSocketReq])
+insertChar :: Atom
+           -> Model
+           -> (Model, Maybe [WebSocketReq])
 insertChar atom model =
   let newEdit =  (model ^. currentEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
   in
-   updateLayout $
-     (model { _currentEdit = newEdit
+     (updateLayout $ model { _currentEdit = newEdit
 --        , _index    = model ^. index
          , _caret       = succ (model ^. caret)
 --         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
@@ -260,12 +271,12 @@ backspaceChar model
       c       = (model ^. document) ! index'
       newEdit = (model ^. currentEdit) ++ [Delete index' c]
   in
-   updateLayout $
-     (model { _currentEdit = newEdit
-            , _index       = pred (model ^. index)
-            , _caret       = pred (model ^. caret)
-  --        , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
-            }, Just $ [WebSocketReq (model ^. userId) (ReqUpdateCurrent newEdit)])
+     (updateLayout $
+       model { _currentEdit = newEdit
+             , _index       = pred (model ^. index)
+             , _caret       = pred (model ^. caret)
+  --         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
+             }, Just $ [WebSocketReq (model ^. userId) (ReqUpdateCurrent newEdit)])
  | otherwise = (model, Nothing)
 
 handleAction :: EditAction -> Model -> (Model, Maybe [WebSocketReq])
@@ -343,6 +354,13 @@ relativeClickPos model =
       (Just (mx, my)) -> Just (mx - (rectLeft epos), my - (rectTop epos))
 -}
 
+-- | convert from window(?) coordinates to coordinates relative to the
+-- top, left corner of the editor div.
+--
+relativeClickPos :: Model
+                 -> Double
+                 -> Double
+                 -> Maybe (Double, Double)
 relativeClickPos model mx my =
    case model ^. editorPos of
     Nothing     -> Nothing
@@ -380,7 +398,12 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          | x < (box ^. boxWidth) -> i
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
 
-indexAtPos :: FontMetrics -> VBox [HBox [AtomBox]] -> (Double, Double) -> Maybe Int
+-- | calculate the index to Atom in the document which is the hit
+-- target of the provided (x,y) coordinates
+indexAtPos :: FontMetrics           -- ^ font metrics for characters in this document
+           -> VBox [HBox [AtomBox]] -- ^ current layout of the document
+           -> (Double, Double)      -- ^ (x,y) coordinates relative to the top-left of the editor div
+           -> Maybe Int             -- ^ index of atom if a match was found
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
    Nothing -> Nothing
@@ -391,8 +414,10 @@ indexAtPos fm vbox (x,y) =
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumLine vbox = sum (map (\box -> atomLength (box ^. boxContent)) (vbox ^. boxContent))
 
--- | FIXME - font size, style, etc
-getFontMetric :: JSElement -> RichChar -> IO (RichChar, (Double, Double))
+-- | calculate width and height of a 'RichChar'
+getFontMetric :: JSElement -- ^ reference to hidden \<span\> which is used to meassure character sizes
+              -> RichChar  -- ^ 'RichChar' to measure
+              -> IO (RichChar, (Double, Double)) -- ^ (RichChar, (width, height))
 getFontMetric measureElm rc@(RichChar font c) =
   do setStyle measureElm "font-size"   (JS.pack $ (show $ font ^. fontSize) ++ "px")
      setStyle measureElm "font-weight" (fontWeightJS $ font ^. fontWeight)
@@ -423,7 +448,6 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
 
 foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
         JSElement -> IO ()
-
 
 browserIO' :: Action
            -> Model
@@ -456,6 +480,12 @@ browserIO' action model =
                                 Just {} -> pure Nothing
                         | otherwise -> pure Nothing
                       _ -> pure Nothing
+     mTargetRect <- case action of
+                      (MouseClick e) ->
+                        do elem <- target e
+                           targetRect <- getBoundingClientRect elem
+                           pure (Just $ targetRect)
+                      _ -> pure Nothing
 {-
      mMeasureElem <- case action of
                       UpdateMetrics ->
@@ -474,6 +504,7 @@ browserIO' action model =
 -}
      pure $ BrowserIO { _bSelectionData = mSelectionData
                       , _bEditorPos     = Just rect
+                      , _mTargetRect    = mTargetRect
                       , _fontMetric     = mFontMetric
                       }
 
@@ -526,7 +557,16 @@ update' action ioData model'' =
                        in handleAction (InsertAtom (RC rc)) model'
         | otherwise -> (model, Nothing)
 
-      MouseClick e -> (model, Nothing)
+      MouseClick e -> -- (model, Nothing)
+           let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+               mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+               model' = model & mousePos ?~ (clientX e, clientY e)
+                              & caret .~ (fromMaybe (model ^. caret) mIndex)
+                              & targetPos .~ (ioData ^. mTargetRect)
+           in case mIndex of
+               (Just i) -> handleAction (MoveCaret i) model'
+               Nothing  -> (model', Nothing)
+
 {-
         do elem <- target e
 {-
@@ -628,6 +668,7 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
 
 -}
 
+-- | calculate tho CSS value for a 'Font'
 fontToStyle :: Font -> Text
 fontToStyle font =
   "font-size: " <> Text.pack (show $ font ^. fontSize) <>
@@ -638,7 +679,9 @@ fontToStyle font =
                           Oblique -> "oblique;")
 
 
-renderAtomBox :: AtomBox -> [HTML Action]
+-- | convert an 'AtomBox' to HTML
+renderAtomBox :: AtomBox
+              -> [HTML Action]
 -- renderTextBox box = CDATA True (box ^. boxContent)
 renderAtomBox box =
   case box ^. boxContent of
@@ -649,17 +692,21 @@ renderAtomBox box =
     renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
     nbsp = Text.replace " " (Text.singleton '\160')
 
+-- | convert a horizontal list of 'AtomBom' to HTML
 renderAtomBoxes' :: HBox [AtomBox] -> HTML Action
 renderAtomBoxes' box =
     [hsx| <div class=("line"::Text)><% concatMap renderAtomBox (box ^. boxContent)  %></div> |]
 --  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
 
+-- | convert a vertical list of horizontal lists of 'AtomBom' to HTML
 renderAtomBoxes :: VBox [HBox [AtomBox]] -> HTML Action
 renderAtomBoxes lines =
   [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
 
-linesToHTML :: VBox [HBox [AtomBox]] -> HTML Action
-linesToHTML lines = renderAtomBoxes lines
+{-
+ linesToHTML :: VBox [HBox [AtomBox]] -> HTML Action
+ linesToHTML lines = renderAtomBoxes lines
+-}
 {-
 textToHTML :: FontMetrics -> Double -> Int -> Text -> HTML Action
 textToHTML fm maxWidth caret txt =
@@ -669,11 +716,13 @@ textToHTML fm maxWidth caret txt =
    renderTextBoxes (layoutBoxes maxWidth (0, boxes'))
 -}
 
-renderDoc :: VBox [HBox [AtomBox]] -> HTML Action
-renderDoc lines =
+-- render a layout (vertical list of horizontal lists of AtomBoxes) to HTML
+renderLayout :: VBox [HBox [AtomBox]]
+          -> HTML Action
+renderLayout lines =
   [hsx|
     <div data-path="root">
-     <% linesToHTML lines %>
+     <% renderAtomBoxes lines %>
 --        <% textToHTML fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
@@ -689,7 +738,16 @@ renderDoc lines =
        (_:cs) -> b : rlines cs
 
 
-indexToPosAtom :: Int -> FontMetrics -> AtomBox -> Maybe Double
+-- | calculate the x offset from the left side of an AtomBox to the
+-- right side of the element at position specified by the index into
+-- the AtomBox.
+--
+-- Some AtomBoxes only contain a single item (such as an
+-- image). Others contain multiple items -- such as text.
+indexToPosAtom :: Int
+               -> FontMetrics
+               -> AtomBox
+               -> Maybe Double
 indexToPosAtom index fm box =
   case box ^. boxContent of
     (RT rt)
@@ -703,7 +761,7 @@ indexToPosAtom index fm box =
         Just (w, _) -> acc + w
         Nothing -> acc
 
--- | given a character index, calculate its (left, top, height) coordinates in the editor
+-- | given an index, calculate its (left, top, height) coordinates in the editor
 --
 indexToPos :: Int
            -> Model
@@ -830,7 +888,7 @@ view' model =
             <button [incUserId]>UserId+</button>
             <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-              <% renderDoc (model ^. layout) %>
+              <% renderLayout (model ^. layout) %>
             </div>
 
            </div>
@@ -847,7 +905,7 @@ editorMUV =
                        , _caret         = 0
                        , _fontMetrics   = Map.empty
                        , _currentFont   = defaultFont
-                       , _measureElem   = Nothing
+--                       , _measureElem   = Nothing
                        , _debugMsg      = Nothing
                        , _mousePos      = Nothing
                        , _editorPos     = Nothing
