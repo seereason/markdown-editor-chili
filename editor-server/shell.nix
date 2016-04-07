@@ -4,10 +4,11 @@ let
 
   inherit (nixpkgs) pkgs;
 
-  f = { mkDerivation, acid-state, base, bytestring, containers
+  f = { mkDerivation, acid-state, aeson, base, bytestring, containers
       , filepath, happstack-server, hsp, lens, mtl
       , safecopy, servant, servant-happstack, stdenv, text, time
       , web-routes, cabal-install, cabal2nix, patches-vector, hsx2hs
+      , websockets, happstack-websockets, userid
       }:
       mkDerivation {
         pname = "editor-server";
@@ -16,11 +17,12 @@ let
         isLibrary = false;
         isExecutable = true;
         executableHaskellDepends = [
-          acid-state base bytestring containers filepath
+          acid-state aeson base bytestring containers filepath
           happstack-server hsp lens mtl safecopy servant servant-happstack
-          text time web-routes patches-vector hsx2hs
+          text time web-routes patches-vector hsx2hs websockets
+	  happstack-websockets userid
         ];
-        buildTools = [ cabal-install cabal2nix ];
+        buildTools = [ cabal-install ];
         description = "Server backend for the wysiwyg editor";
         license = stdenv.lib.licenses.bsd3;
       };

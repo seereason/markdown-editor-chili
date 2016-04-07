@@ -22,6 +22,8 @@ import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set)
 import Control.Lens.At (at, ix)
 import Control.Lens.TH (makeLenses)
 import Control.Monad (when)
+import Data.Aeson
+import Data.Aeson.TH (deriveJSON, defaultOptions)
 import Data.Char (chr)
 -- import qualified Data.JSString as JS
 -- import Data.JSString.Text (textToJSString, textFromJSString)
@@ -46,11 +48,15 @@ import Language.Haskell.HSX.QQ (hsx)
 
 type Index = Int
 
+deriveJSON defaultOptions ''Edit
+deriveJSON defaultOptions ''Patch
+
 data FontStyle
   = Normal
   | Italic
   | Oblique
   deriving (Eq, Ord, Show)
+deriveJSON defaultOptions ''FontStyle
 
 data FontWeight
   = FW100
@@ -63,6 +69,7 @@ data FontWeight
   | FW800
   | FW900
   deriving (Eq, Ord, Show)
+deriveJSON defaultOptions ''FontWeight
 
 fontWeightText :: FontWeight -> Text
 fontWeightText weight =
@@ -84,6 +91,7 @@ data Font = Font
  }
  deriving (Eq, Ord, Show)
 makeLenses ''Font
+deriveJSON defaultOptions ''Font
 
 defaultFont :: Font
 defaultFont =
@@ -98,6 +106,7 @@ data RichChar = RichChar
   }
   deriving (Eq, Ord, Show)
 makeLenses ''RichChar
+deriveJSON defaultOptions ''RichChar
 
 type FontMetrics = Map RichChar (Double, Double)
 
@@ -112,6 +121,7 @@ data RichText = RichText
   }
   deriving (Eq, Show)
 makeLenses ''RichText
+deriveJSON defaultOptions ''RichText
 
 richTextLength :: RichText -> Int
 richTextLength (RichText txts) = sum (map (Text.length . snd) txts)
@@ -143,12 +153,14 @@ data Image = Image
   }
   deriving (Eq, Show)
 makeLenses ''Image
+deriveJSON defaultOptions ''Image
 
 data Atom
   = RC RichChar
   | RT RichText
   | Img Image
     deriving (Eq, Show)
+deriveJSON defaultOptions ''Atom
 
 isRichChar :: Atom -> Bool
 isRichChar (RC {}) = True

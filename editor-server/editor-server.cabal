@@ -11,20 +11,25 @@ cabal-version:       >=1.10
 
 executable editor-server
   main-is:             Main.hs
-  build-depends:       acid-state,
+  build-depends:       aeson,
+                       acid-state,
                        base >=4.8 && <4.9,
                        bytestring,
                        containers,
                        editor-common,
                        happstack-server,
+                       happstack-websockets,
                        hsp,
                        filepath,
                        mtl,
                        lens,
+                       patches-vector,
                        safecopy,
                        servant,
                        servant-happstack,
+                       stm,
                        text,
                        time,
-                       web-routes
+                       web-routes,
+                       websockets
   default-language:    Haskell2010
