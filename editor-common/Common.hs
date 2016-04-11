@@ -220,3 +220,18 @@ data EditState
   | MovingCaret
     deriving (Show, Eq)
 
+patchDelta :: Patch a -> Int
+patchDelta patch =
+  let edits = Patch.toList patch
+      offset (Insert {})  = 1
+      offset (Delete {})  = (-1)
+      offset (Replace {}) = 0
+  in foldr (\edit delta -> delta + offset edit) 0 edits
+
+maxEditPos :: Patch a -> Int
+maxEditPos patch =
+  let edits = Patch.toList patch
+  in case last edits of
+        Insert i _    -> i
+        Delete i _    -> i
+        Replace i _ _ -> i

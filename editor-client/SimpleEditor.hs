@@ -19,6 +19,7 @@
 module Main where
 
 -- NEXT STEP: move layout recalculation into a single location
+-- NEXT STEP: when inserting a foreign patch, we need to update font metrics with any new characters
 
 import Common
 import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set)
@@ -30,10 +31,10 @@ import Data.Char (chr)
 import qualified Data.ByteString.Lazy.Char8 as C
 import qualified Data.JSString as JS
 import Data.JSString.Text (textToJSString, textFromJSString)
-import Data.List (findIndex, groupBy, null, splitAt)
+import Data.List (findIndex, groupBy, nub, null, splitAt)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromJust, fromMaybe, maybe)
+import Data.Maybe (fromJust, fromMaybe, maybe, catMaybes)
 import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import qualified Data.Patch as Patch
@@ -104,7 +105,7 @@ data BrowserIO = BrowserIO
   { _bSelectionData :: Maybe SelectionData
   , _bEditorPos     :: Maybe DOMClientRect
   , _mTargetRect    :: Maybe DOMClientRect
-  , _fontMetric     :: Maybe (Double, Double)
+  , _newFontMetrics :: Map RichChar (Double, Double)
   }
 makeLenses ''BrowserIO
 
@@ -335,7 +336,7 @@ handleAction ea model
   | model ^. editState == MovingCaret =
       case ea of
        MoveCaret i ->
-         (model { _index = i
+         (updateLayout $ model { _index = i
                 , _caret = i
                 }, Nothing)
        InsertAtom {} ->
@@ -449,6 +450,21 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
 foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
         JSElement -> IO ()
 
+-- | return 'Nothing' if metric already exists
+calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
+calcMetrics fm rcs =
+  do (Just document)    <- currentDocument
+     (Just measureElem) <- getElementById document "measureElement"
+     metrics <- mapM (calcMetric measureElem) (nub rcs)
+     pure (Map.fromList (catMaybes metrics))
+  where
+    calcMetric measureElem rc =
+      case Map.lookup rc fm of
+        (Just {}) -> pure Nothing
+        Nothing ->
+          do m <- getFontMetric measureElem rc
+             pure (Just m)
+
 browserIO' :: Action
            -> Model
            -> IO BrowserIO
@@ -458,7 +474,7 @@ browserIO' action model =
      rect <- getBoundingClientRect editorElem
      mSelectionData <- getSelectionData
      js_focus editorElem
-     mFontMetric <- case action of
+     nfm <- case action of
                       (KeyPressed c) -> do
                         let rc = RichChar (model ^. currentFont) c
                         case Map.lookup rc (model ^. fontMetrics) of
@@ -466,8 +482,8 @@ browserIO' action model =
                             do (Just document) <- currentDocument
                                (Just measureElem) <- getElementById document "measureElement"
                                (_, metric) <- getFontMetric measureElem rc
-                               pure (Just metric)
-                          Just {} -> pure Nothing
+                               pure (Map.singleton rc metric)
+                          Just {} -> pure Map.empty
                       (KeyDowned c)
                         | c == 32 -> do
                           let rc = RichChar (model ^. currentFont) ' '
@@ -476,10 +492,45 @@ browserIO' action model =
                                   do (Just document) <- currentDocument
                                      (Just measureElem) <- getElementById document "measureElement"
                                      (_, metric) <- getFontMetric measureElem rc
-                                     pure (Just metric)
-                                Just {} -> pure Nothing
-                        | otherwise -> pure Nothing
-                      _ -> pure Nothing
+                                     pure (Map.singleton rc metric)
+                                Just {} -> pure Map.empty
+                        | otherwise -> pure Map.empty
+                      (WSRes wsres) ->
+                        case wsres of
+                          (ResUpdateCurrent uid edits)
+                            | model ^. userId == uid -> pure Map.empty
+                            | otherwise              -> let toRCs :: Atom -> [RichChar]
+                                                            toRCs (Img {})      = []
+                                                            toRCs (RC rc) = [rc]
+                                                            toRCs (RT rt) = richTextToRichChars rt
+                                                            toRCs' :: Edit Atom -> [RichChar]
+                                                            toRCs' (Insert _ a) = toRCs a
+                                                            toRCs' (Delete _ _) = []
+                                                            toRCs' (Replace _ _ a) = toRCs a
+                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' edits)
+                          (ResUpdateCurrent uid edits)
+                            | model ^. userId == uid -> pure Map.empty
+                            | otherwise              -> let toRCs :: Atom -> [RichChar]
+                                                            toRCs (Img {})      = []
+                                                            toRCs (RC rc) = [rc]
+                                                            toRCs (RT rt) = richTextToRichChars rt
+                                                            toRCs' :: Edit Atom -> [RichChar]
+                                                            toRCs' (Insert _ a) = toRCs a
+                                                            toRCs' (Delete _ _) = []
+                                                            toRCs' (Replace _ _ a) = toRCs a
+                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' edits)
+                          (ResAppendPatch uid patch)
+                            | model ^. userId == uid -> pure Map.empty
+                            | otherwise              -> let toRCs :: Atom -> [RichChar]
+                                                            toRCs (Img {})      = []
+                                                            toRCs (RC rc) = [rc]
+                                                            toRCs (RT rt) = richTextToRichChars rt
+                                                            toRCs' :: Edit Atom -> [RichChar]
+                                                            toRCs' (Insert _ a) = toRCs a
+                                                            toRCs' (Delete _ _) = []
+                                                            toRCs' (Replace _ _ a) = toRCs a
+                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList patch))
+                      _ -> pure Map.empty
      mTargetRect <- case action of
                       (MouseClick e) ->
                         do elem <- target e
@@ -505,7 +556,7 @@ browserIO' action model =
      pure $ BrowserIO { _bSelectionData = mSelectionData
                       , _bEditorPos     = Just rect
                       , _mTargetRect    = mTargetRect
-                      , _fontMetric     = mFontMetric
+                      , _newFontMetrics = nfm
                       }
 
 calcLayout :: Model
@@ -542,17 +593,17 @@ update' action ioData model'' =
 
       KeyPressed c  ->
         let rc = RichChar (model ^. currentFont) c
-            model' = case ioData ^. fontMetric of
-                       Nothing       -> model
-                       (Just metric) -> set (fontMetrics . at rc) (Just metric) model
+            model' = case Map.lookup rc (ioData ^. newFontMetrics) of
+              Nothing -> model
+              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
         in handleAction (InsertAtom (RC rc)) model'
 
       -- used for handling special cases like backspace, space
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> handleAction DeleteAtom model
         | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
-                           model' = case ioData ^. fontMetric of
-                             Nothing       -> model
+                           model' = case Map.lookup rc (ioData ^. newFontMetrics) of
+                             Nothing -> model
                              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
                        in handleAction (InsertAtom (RC rc)) model'
         | otherwise -> (model, Nothing)
@@ -560,8 +611,8 @@ update' action ioData model'' =
       MouseClick e -> -- (model, Nothing)
            let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
                mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
-               model' = model & mousePos ?~ (clientX e, clientY e)
-                              & caret .~ (fromMaybe (model ^. caret) mIndex)
+               model' = model & mousePos  ?~ (clientX e, clientY e)
+                              & caret     .~ (fromMaybe (model ^. caret) mIndex)
                               & targetPos .~ (ioData ^. mTargetRect)
            in case mIndex of
                (Just i) -> handleAction (MoveCaret i) model'
@@ -620,13 +671,23 @@ update' action ioData model'' =
             | otherwise              ->
                 let foreignPatch = Patch.fromList edits
                     newLayout = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply foreignPatch (model ^. document))
-                in (set layout newLayout $ set (othersEdits . at uid) (Just edits) model, Nothing)
+                    newCaret = if maxEditPos foreignPatch < (model ^. caret)
+                               then (model ^. caret) + patchDelta (foreignPatch)
+                               else (model ^. caret)
+                in (set caret newCaret $
+                    set layout newLayout $
+                    set (othersEdits . at uid) (Just edits) model, Nothing)
           (ResAppendPatch uid newPatch)
             | model ^. userId == uid -> (model, Nothing)
             | otherwise              ->
                 let newDoc       = apply newPatch (model ^. document)
                     newLayout    = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) newDoc
-                in (set layout newLayout $ set document newDoc model, Nothing)
+                    newCaret = if maxEditPos newPatch < (model ^. caret)
+                               then (model ^. caret) + patchDelta (newPatch)
+                               else (model ^. caret)
+                in (set caret newCaret $
+                    set layout newLayout $
+                    set document newDoc model, Nothing)
 
 {-
 textToBox :: FontMetrics -> Text -> TextBox
