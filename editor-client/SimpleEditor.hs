@@ -36,7 +36,7 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromJust, fromMaybe, maybe, catMaybes)
 import Data.Monoid ((<>))
-import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
+import Data.Patch (Patch, Edit(..), toList, fromList, applicable, apply, diff)
 import qualified Data.Patch as Patch
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -54,6 +54,13 @@ import Language.Haskell.HSX.QQ (hsx)
 import Web.Editor.API
 import Web.ISO.HSX
 import Web.ISO.Types hiding (Context2D(Font))
+import System.IO.Unsafe (unsafePerformIO)
+
+safeApply :: (Eq a) => Patch a -> Vector a -> Vector a
+safeApply p v =
+  if applicable p v
+  then apply p v
+  else unsafePerformIO $ do js_alert "Patch can not be applied." >> pure v
 
 fontWeightJS :: FontWeight -> JS.JSString
 fontWeightJS weight =
@@ -288,7 +295,7 @@ handleAction ea model
        DeleteAtom ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
-             newDoc     = apply newPatch (model ^. document)
+             newDoc     = safeApply newPatch (model ^. document)
              model'     = model { _document    = newDoc
                                 , _patches     = newPatches
                                 , _currentEdit = []
@@ -300,12 +307,12 @@ handleAction ea model
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
-             newDoc     = apply newPatch (model ^. document)
-             model'     = model { _document    = newDoc
-                                , _patches     = newPatches
-                                , _currentEdit = []
-                                , _editState   = MovingCaret
-                                }
+             newDoc     = safeApply newPatch (model ^. document)
+             model'     =  model { _document    = newDoc
+                                 , _patches     = newPatches
+                                 , _currentEdit = []
+                                 , _editState   = MovingCaret
+                                 }
          in handleAction ea model'
 
   | model ^. editState == Deleting =
@@ -314,7 +321,7 @@ handleAction ea model
        InsertAtom _ ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
-             newDoc     = apply newPatch (model ^. document)
+             newDoc     = safeApply newPatch (model ^. document)
              model'     = model { _document = newDoc
                                 , _patches  = newPatches
                                 , _currentEdit = []
@@ -325,7 +332,7 @@ handleAction ea model
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. currentEdit)
              newPatches = (model ^. patches) ++ [newPatch]
-             newDoc     = apply newPatch (model ^. document)
+             newDoc     = safeApply newPatch (model ^. document)
              model'     = model { _document    = newDoc
                                 , _patches     = newPatches
                                 , _currentEdit = []
@@ -337,8 +344,8 @@ handleAction ea model
       case ea of
        MoveCaret i ->
          (updateLayout $ model { _index = i
-                , _caret = i
-                }, Nothing)
+                               , _caret = i
+                               }, Nothing)
        InsertAtom {} ->
          handleAction ea (model { _editState = Inserting })
        DeleteAtom {} ->
@@ -450,7 +457,7 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
 foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
         JSElement -> IO ()
 
--- | return 'Nothing' if metric already exists
+-- | return a Map of any new metrics
 calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
 calcMetrics fm rcs =
   do (Just document)    <- currentDocument
@@ -508,17 +515,6 @@ browserIO' action model =
                                                             toRCs' (Delete _ _) = []
                                                             toRCs' (Replace _ _ a) = toRCs a
                                                         in calcMetrics (model ^. fontMetrics) (concatMap toRCs' edits)
-                          (ResUpdateCurrent uid edits)
-                            | model ^. userId == uid -> pure Map.empty
-                            | otherwise              -> let toRCs :: Atom -> [RichChar]
-                                                            toRCs (Img {})      = []
-                                                            toRCs (RC rc) = [rc]
-                                                            toRCs (RT rt) = richTextToRichChars rt
-                                                            toRCs' :: Edit Atom -> [RichChar]
-                                                            toRCs' (Insert _ a) = toRCs a
-                                                            toRCs' (Delete _ _) = []
-                                                            toRCs' (Replace _ _ a) = toRCs a
-                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' edits)
                           (ResAppendPatch uid patch)
                             | model ^. userId == uid -> pure Map.empty
                             | otherwise              -> let toRCs :: Atom -> [RichChar]
@@ -559,11 +555,12 @@ browserIO' action model =
                       , _newFontMetrics = nfm
                       }
 
+-- | create a layout using: the current document + currentEdit + othersEditsn
 calcLayout :: Model
            -> VBox [HBox [AtomBox]]
 calcLayout model =
   atomsToLines (model ^. fontMetrics) (model ^. maxWidth)
-   (foldr (\edits doc -> apply (Patch.fromList edits) doc) (apply (Patch.fromList $ model ^. currentEdit) (model ^. document)) (Map.elems (model ^. othersEdits)))
+    (safeApply (Patch.fromList $ model ^. currentEdit) (foldr (\edits doc -> safeApply (Patch.fromList edits) doc) (model ^. document) (Map.elems (model ^. othersEdits))))
 
 updateLayout :: Model -> Model
 updateLayout m = m { _layout = calcLayout m }
@@ -608,12 +605,13 @@ update' action ioData model'' =
                        in handleAction (InsertAtom (RC rc)) model'
         | otherwise -> (model, Nothing)
 
-      MouseClick e -> -- (model, Nothing)
+      MouseClick e ->
            let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
                mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
                model' = model & mousePos  ?~ (clientX e, clientY e)
                               & caret     .~ (fromMaybe (model ^. caret) mIndex)
                               & targetPos .~ (ioData ^. mTargetRect)
+                              & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
            in case mIndex of
                (Just i) -> handleAction (MoveCaret i) model'
                Nothing  -> (model', Nothing)
@@ -670,25 +668,31 @@ update' action ioData model'' =
             | model ^. userId == uid -> (model, Nothing)
             | otherwise              ->
                 let foreignPatch = Patch.fromList edits
-                    newLayout = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply foreignPatch (model ^. document))
-                    newCaret = if maxEditPos foreignPatch < (model ^. caret)
-                               then (model ^. caret) + patchDelta (foreignPatch)
-                               else (model ^. caret)
-                in (set caret newCaret $
-                    set layout newLayout $
-                    set (othersEdits . at uid) (Just edits) model, Nothing)
+                    model' = updateLayout (set (othersEdits . at uid) (Just edits) (model & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics))))
+--                    newLayout = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply foreignPatch (model ^. document))
+                    newCaret = if maxEditPos foreignPatch < (model' ^. caret)
+                               then (model' ^. caret) + patchDelta foreignPatch
+                               else (model' ^. caret)
+                in (set caret newCaret $ model', Nothing)
           (ResAppendPatch uid newPatch)
             | model ^. userId == uid -> (model, Nothing)
             | otherwise              ->
-                let newDoc       = apply newPatch (model ^. document)
-                    newLayout    = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) newDoc
+                let newDoc = safeApply newPatch (model ^. document)
+                    model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics))
+                                                 & (othersEdits . at uid) .~ Nothing
+                                                 & document .~ newDoc)
                     newCaret = if maxEditPos newPatch < (model ^. caret)
-                               then (model ^. caret) + patchDelta (newPatch)
+                               then (model ^. caret) -- + patchDelta (newPatch)
                                else (model ^. caret)
-                in (set caret newCaret $
-                    set layout newLayout $
-                    set document newDoc model, Nothing)
+                in (model' {- & caret .~ newCaret -}, Nothing)
 
+--                    model' = updateLayout (set (othersEdits . at uid) Nothing (model & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics)))
+--                    model' = updateLayout (set (othersEdits . at uid) Nothing (model & fontMetrics %~ (\old -> old `mappend` ioData newFontMetrics))
+--                    newLayout    = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) newDoc
+{-
+                in (set caret newCaret $
+                    set document newDoc model, Nothing)
+-}
 {-
 textToBox :: FontMetrics -> Text -> TextBox
 textToBox fm input
@@ -906,6 +910,13 @@ view' model =
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
                              <p>debugMsg: <% show (model ^. debugMsg) %></p>
+                             <p>Document: <% show (model ^. document) %></p>
+                             <p>Patches:  <% show (model  ^. patches) %></p>
+                             <p>Current Patch: <% show (model  ^. currentEdit) %></p>
+                             <p>Others Edits: <% show (model  ^. othersEdits) %></p>
+                             <p>Index: <% show (model ^. index) %></p>
+                             <p>Caret: <% show (model ^. caret) %></p>
+
                              <p>mousePos: <% show (model ^. mousePos) %></p>
                              <p>editorPos: <% let mpos = model ^. editorPos in
                                               case mpos of
@@ -923,12 +934,6 @@ view' model =
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-                             <p>Document: <% show (model ^. document) %></p>
-                             <p>Patches:  <% show (model  ^. patches) %></p>
-                             <p>Current Patch: <% show (model  ^. currentEdit) %></p>
-                             <p>Others Edits: <% show (model  ^. othersEdits) %></p>
-                             <p>Index: <% show (model ^. index) %></p>
-                             <p>Caret: <% show (model ^. caret) %></p>
                                 <% case model ^. selectionData of
                                      Nothing -> <p>No Selection</p>
                                      (Just selectionData) ->
