@@ -1,6 +1,6 @@
 module Main where
 
-import Common               (Atom)
+import Common               (Atom, ConnectionId, merge)
 import Control.Monad        (MonadPlus, msum, forever)
 import Control.Monad.Trans  (MonadIO(liftIO))
 import qualified Data.ByteString.Lazy.Char8 as C
@@ -9,7 +9,11 @@ import Control.Concurrent.STM.TVar (TVar, newTVar, modifyTVar', readTVar, writeT
 import Control.Exception    (finally)
 import Data.Aeson.Encode    (encodeToTextBuilder)
 import Data.Aeson           (decode, encode, toJSON)
-import Data.Patch           (Patch, Edit(..), toList, fromList, apply, diff)
+import Data.Monoid          (mempty)
+import Data.Patch           (Patch, Edit(..), toList, fromList, apply, diff, transformWith)
+import Data.Sequence          (Seq, (|>))
+import Data.Foldable        as Foldable
+import qualified Data.Sequence as Seq
 import Data.Text            (Text)
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.IO as T
@@ -25,19 +29,19 @@ import Network.WebSockets (Connection, ServerApp, acceptRequest, receiveData, se
 instance Monoid ServantErr
 
 data Document = Document
- { patches      :: [Patch Atom]
- , currentEdit  :: [Edit Atom]
+ { patches      :: Seq (Patch Atom)
+-- , currentEdit  :: [Edit Atom]
  }
 
 emptyDocument :: Document
 emptyDocument = Document
- { patches     = []
- , currentEdit = []
+ { patches     = mempty
+-- , currentEdit = []
  }
 
 data ServerState = ServerState
- { nextConnNum :: Int
- , connections :: [(Int, Connection)]
+ { nextConnNum :: ConnectionId
+ , connections :: [(ConnectionId, Connection)]
  , document    :: Document
  }
 
@@ -76,22 +80,53 @@ editorApp tvServerState pendingConnection =
                    case mReqs of
                      Nothing -> pure ()
                      (Just reqs) ->
-                          mapM_ handleReq reqs) `finally` (do putStrLn $ "Removing connection: " ++ show i
-                                                              atomically $ modifyTVar' tvServerState (\ss -> ss { connections = filter (\(n,_) -> n /= i) (connections ss) }))
+                          mapM_ (handleReq tvServerState conn i) reqs)
+       `finally` (do putStrLn $ "Removing connection: " ++ show i
+                     atomically $ modifyTVar' tvServerState (\ss -> ss { connections = filter (\(n,_) -> n /= i) (connections ss) }))
      --             sendTextData conn t
-  where
-    handleReq req =
-      case req of
-        (WebSocketReq userid (ReqUpdateCurrent edits)) ->
-          do conns <- atomically (connections <$> readTVar tvServerState)
-             let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResUpdateCurrent userid edits)))
-             mapM_ (\(_, conn) -> sendTextData conn msg) conns
-        (WebSocketReq userid (ReqAddPatch patch)) ->
-          do conns <- atomically (connections <$> readTVar tvServerState)
-             let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResAppendPatch userid patch)))
-             mapM_ (\(_, conn) -> sendTextData conn msg) conns
 
-websockets :: (MonadIO m) => TVar ServerState -> ServerPartT m Response
+-- FIXME: patches need to have their order number attached to the response
+-- FIXME: we probably have a race condition -- calculating the
+-- newPatch and the patch number needs to be done inside the
+-- atomically
+
+handleReq :: TVar ServerState
+          -> Connection
+          -> ConnectionId
+          -> WebSocketReq
+          -> IO ()
+handleReq tvServerState connection connectionId (WebSocketReq req) =
+  case req of
+    (ReqAddPatch forkedAt patchCandidate) ->
+      do (conns, r) <- atomically $
+           do ss <- readTVar tvServerState
+              let c = connections ss
+                  d = document ss
+              let serverPatch = mconcat (Foldable.toList $ Seq.drop (forkedAt + 1) (patches d))
+                  (_, newPatch) = transformWith merge serverPatch patchCandidate
+                  doc' = d { patches = (patches d) |> newPatch }
+                  i    = Seq.length (patches d) - 1
+              writeTVar tvServerState  (ss { document = doc'})
+              pure (c, (i, newPatch))
+         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResAppendPatch connectionId r)))
+         mapM_ (\(_, conn) -> sendTextData conn msg) conns
+    ReqInit ->
+      do ps <- atomically $ do (patches . document) <$> readTVar tvServerState
+         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResInit connectionId ps)))
+         sendTextData connection msg
+{-
+    (WebSocketReq (ReqUpdateCurrent edits)) ->
+      do conns <- atomically (connections <$> readTVar tvServerState)
+         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResUpdateCurrent connectionId edits)))
+         mapM_ (\(_, conn) -> sendTextData conn msg) conns
+    (WebSocketReq (ReqAddPatch patch)) ->
+      do conns <- atomically (connections <$> readTVar tvServerState)
+         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResAppendPatch connectionId patch)))
+         mapM_ (\(_, conn) -> sendTextData conn msg) conns
+-}
+websockets :: (MonadIO m) =>
+              TVar ServerState
+           -> ServerPartT m Response
 websockets tvServerState = runWebSocketsHappstack (editorApp tvServerState)
 
 editorServer :: TVar ServerState -> Server EditorAPI

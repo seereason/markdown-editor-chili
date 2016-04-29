@@ -159,8 +159,12 @@ data Atom
   = RC RichChar
   | RT RichText
   | Img Image
+  | Conflict Atom Atom
     deriving (Eq, Show)
 deriveJSON defaultOptions ''Atom
+
+merge :: Atom -> Atom -> Atom
+merge a1 a2 = Conflict a1 a2
 
 isRichChar :: Atom -> Bool
 isRichChar (RC {}) = True
@@ -173,7 +177,6 @@ atomLength :: Atom -> Int
 atomLength (RC {})  = 1
 atomLength (RT (RichText txts)) = sum (map (Text.length . snd) txts)
 atomLength (Img {})       = 1
-
 
 type AtomBox  = Box Singleton Atom
 
@@ -219,6 +222,8 @@ data EditState
   | Deleting
   | MovingCaret
     deriving (Show, Eq)
+
+type ConnectionId = Int
 
 patchDelta :: Patch a -> Int
 patchDelta patch =

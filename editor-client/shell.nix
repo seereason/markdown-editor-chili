@@ -6,7 +6,7 @@ let
 
   f = { mkDerivation, aeson, base, bytestring, ghcjs-base, hsx2hs, http-types, lens, stdenv,
         text, time, isomaniac, servant,  patches-vector, http-api-data, hsp, web-routes, web-routes-th,
-        userid, Cabal
+        userid, Cabal, servant-isomaniac
       }:
       mkDerivation {
         pname = "markdown-editor";
@@ -14,7 +14,7 @@ let
         src = ./.;
         isLibrary = false;
         isExecutable = true;
-        executableHaskellDepends = [ aeson base bytestring ghcjs-base hsx2hs http-types lens isomaniac servant hsp text time patches-vector http-api-data web-routes web-routes-th userid Cabal ];
+        executableHaskellDepends = [ aeson base bytestring ghcjs-base hsx2hs http-types lens isomaniac servant hsp text time patches-vector http-api-data web-routes web-routes-th userid Cabal servant-isomaniac ];
         buildTools = [ pkgs.haskellPackages.cabal-install pkgs.haskellPackages.ghc ];
         description = "An WYSIWYG editor for markdown in HTML5";
         license = stdenv.lib.licenses.unfree;

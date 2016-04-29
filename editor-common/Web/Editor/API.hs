@@ -7,29 +7,32 @@
 {-# LANGUAGE TemplateHaskell            #-}
 module Web.Editor.API where
 
-import           Common (Atom)
+import           Common (Atom, ConnectionId)
 import           Data.Aeson.TH (defaultOptions, deriveJSON)
 import           Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
+import           Data.Sequence (Seq)
+import           Data.Text (Text)
 import           Data.UserId(UserId(..))
 import           Servant.API ((:<|>), (:>), ReqBody, JSON, Post, Raw)
 import           Web.HttpApiData (FromHttpApiData, ToHttpApiData)
 
 data WSRequest
-  = ReqAddPatch (Patch Atom)
-  | ReqUpdateCurrent [Edit Atom]
+  = ReqAddPatch Int (Patch Atom)
+--  | ReqUpdateCurrent [Edit Atom]
+  | ReqInit
     deriving Show
 deriveJSON defaultOptions ''WSRequest
 
 data WebSocketReq = WebSocketReq
-     { reqUser    :: UserId
-     , reqRequest :: WSRequest
+     { reqRequest :: WSRequest
      }
     deriving Show
 deriveJSON defaultOptions ''WebSocketReq
 
 data WebSocketRes
-  = ResUpdateCurrent UserId [Edit Atom]
-  | ResAppendPatch UserId (Patch Atom)
+  = ResAppendPatch ConnectionId (Int, Patch Atom)
+--  | ResUpdateCurrent ConnectionId [Edit Atom]
+  | ResInit ConnectionId (Seq (Patch Atom))
     deriving Show
 deriveJSON defaultOptions ''WebSocketRes
 
