@@ -22,6 +22,8 @@ module Main where
 -- NEXT STEP: when inserting a foreign patch, we need to update font metrics with any new characters
 
 import Common
+import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM.TQueue (TQueue, newTQueue, writeTQueue)
 import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set, _2)
 import Control.Lens.At (at, ix)
 import Control.Lens.TH (makeLenses)
@@ -41,11 +43,13 @@ import Data.Patch (Patch, Edit(..), toList, fromList, applicable, apply, diff)
 import qualified Data.Patch as Patch
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
 import Data.UserId (UserId(..))
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
+import GHCJS.Foreign.Callback (OnBlocked(..), Callback, asyncCallback)
 import JavaScript.Web.MessageEvent (MessageEvent(..), MessageEventData(..))
 import qualified JavaScript.Web.MessageEvent as MessageEvent
 import JavaScript.Web.WebSocket (WebSocketRequest(..), connect, send)
@@ -128,6 +132,8 @@ data Model = Model
   , _maxWidth      :: Double
   , _selectionData :: Maybe SelectionData
   , _userId        :: UserId
+--   , _now           :: POSIXTime
+  , _lastActivity  :: POSIXTime
   }
 makeLenses ''Model
 
@@ -136,6 +142,7 @@ data BrowserIO = BrowserIO
   , _bEditorPos     :: Maybe DOMClientRect
   , _mTargetRect    :: Maybe DOMClientRect
   , _newFontMetrics :: Map RichChar (Double, Double)
+  , _bNow           :: POSIXTime
   }
 makeLenses ''BrowserIO
 
@@ -154,6 +161,7 @@ data Action
     | IncUserId
     | WSRes WebSocketRes
     | Init
+    | ActivityTimeout
     deriving Show
 
 data EditAction
@@ -349,7 +357,8 @@ handleAction ea model
   --                               , _currentEdit = []
                                    _editState   = MovingCaret
                                  }
-         in handleAction ea model'
+             (model'', mwsq) = handleAction ea model'
+         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
 
   | model ^. editState == Deleting =
       case ea of
@@ -500,6 +509,9 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
 foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
         JSElement -> IO ()
 
+foreign import javascript unsafe "window[\"setTimeout\"]($1, $2)" js_setTimeout ::
+  Callback (IO ()) -> Int -> IO ()
+
 -- | return a Map of any new metrics
 calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
 calcMetrics fm rcs =
@@ -515,15 +527,17 @@ calcMetrics fm rcs =
           do m <- getFontMetric measureElem rc
              pure (Just m)
 
-browserIO' :: Action
+browserIO' :: TQueue Action
+           -> Action
            -> Model
            -> IO BrowserIO
-browserIO' action model =
+browserIO' queue action model =
   do (Just doc)        <- currentDocument
      (Just editorElem) <- getElementById doc "editor"
      rect <- getBoundingClientRect editorElem
      mSelectionData <- getSelectionData
      js_focus editorElem
+     now' <- getPOSIXTime
      nfm <- case action of
                       (KeyPressed c) -> do
                         let rc = RichChar (model ^. currentFont) c
@@ -605,10 +619,18 @@ browserIO' action model =
                      doMetrics model' me
             (Just me) -> doMetrics model me
 -}
+--     when (now' >= (model ^. lastActivity) + 1) (atomically $ writeTQueue queue ActivityTimeout)
+     case action of
+       ActivityTimeout ->do cb <- asyncCallback $ atomically $ writeTQueue queue ActivityTimeout
+                            js_setTimeout cb 2000
+       Init -> do cb <- asyncCallback $ atomically $ writeTQueue queue ActivityTimeout
+                  js_setTimeout cb 1000
+       _ -> pure ()
      pure $ BrowserIO { _bSelectionData = mSelectionData
                       , _bEditorPos     = Just rect
                       , _mTargetRect    = mTargetRect
                       , _newFontMetrics = nfm
+                      , _bNow           = now'
                       }
 
 update' :: Action
@@ -616,12 +638,30 @@ update' :: Action
         -> Model
         -> (Model, Maybe [WebSocketReq])
 update' action ioData model'' =
-  let model = model'' { _editorPos     = ioData ^. bEditorPos
+  let activity =
+        case action of
+          AddImage {}   -> True
+          KeyPressed {} -> True
+          PasteA {}     -> True
+          KeyDowned {}  -> True
+          MouseClick {} -> True
+          _             -> False
+      forceActivity =
+        if ((not activity) && ((ioData ^. bNow) >= (model ^. lastActivity) + 2))
+        then True
+        else False
+      model = model'' { _editorPos     = ioData ^. bEditorPos
                       , _selectionData = ioData ^. bSelectionData
+                      , _lastActivity = if activity then (ioData ^. bNow) else (model'' ^. lastActivity)
                       }
   in
      case action of
       Init             -> (model, Just [WebSocketReq ReqInit])
+      ActivityTimeout  -> if forceActivity
+                             then let (model', req) = handleAction (MoveCaret (model ^. caret)) model
+                                  in (model' & debugMsg .~ (Just $ Text.pack "Forced update."), req)
+                             else (model & debugMsg .~ (Just $ Text.pack $ show $ ioData ^. bNow), Nothing)
+
       AddImage         ->  handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model
       IncreaseFontSize ->  (model & (currentFont . fontSize) %~ succ, Nothing)
       DecreaseFontSize ->  (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
@@ -1049,6 +1089,8 @@ editorMUV =
                        , _maxWidth      = 300
                        , _selectionData = Nothing
                        , _userId        = UserId 0
+--                       , _now           = 0
+                       , _lastActivity  = 0
                        }
       , browserIO = browserIO'
       , update = update'
