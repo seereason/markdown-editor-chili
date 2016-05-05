@@ -236,7 +236,10 @@ patchDelta patch =
 maxEditPos :: Patch a -> Int
 maxEditPos patch =
   let edits = Patch.toList patch
-  in case last edits of
+  in
+    case edits of
+      [] -> 0
+      _ -> case last edits of
         Insert i _    -> i
         Delete i _    -> i
         Replace i _ _ -> i

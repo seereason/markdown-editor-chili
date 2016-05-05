@@ -281,6 +281,7 @@ boxify fm v
             (map (textToBox fm) $ map richCharsToRichText $ richCharsToWords $ (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
       atom@(Img img) ->
         (Box (img ^. imageWidth) (img ^. imageHeight) atom) : boxify fm (Vector.tail v)
+      atom -> error $ "boxify does not handle this atom yet: " ++ show atom
 
 atomsToLines :: FontMetrics
              -> Double       -- ^ maximum width of a line
@@ -352,11 +353,12 @@ handleAction ea model
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
 --             newPatches = (model ^. patches) ++ [newPatch]
 --             newDoc     = safeApply newPatch (model ^. document)
-             model'     =  model { -- _document    = newDoc
+             model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
+                                                                      & pendingEdit   .~ []
 --                                 , _patches     = newPatches
   --                               , _currentEdit = []
-                                   _editState   = MovingCaret
-                                 }
+                                  , _editState   = MovingCaret
+                                  }
              (model'', mwsq) = handleAction ea model'
          in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
 
@@ -381,6 +383,18 @@ handleAction ea model
          in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
 
        MoveCaret {} ->
+         let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
+--             newPatches = (model ^. patches) ++ [newPatch]
+--             newDoc     = safeApply newPatch (model ^. document)
+             model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
+                                                                      & pendingEdit   .~ []
+--                                 , _patches     = newPatches
+  --                               , _currentEdit = []
+                                  , _editState   = MovingCaret
+                                  }
+             (model'', mwsq) = handleAction ea model'
+         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
+{-         
          let -- newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
 --             newPatches = (model ^. patches) ++ [newPatch]
 --             newDoc     = safeApply newPatch (model ^. document)
@@ -390,7 +404,7 @@ handleAction ea model
                                  _editState   = MovingCaret
                                 }
          in handleAction ea model'
-
+-}
   | model ^. editState == MovingCaret =
       case ea of
        MoveCaret i ->
@@ -766,9 +780,10 @@ update' action ioData model'' =
 -}
           (ResAppendPatch connId (patchId, newPatch))
             | model ^. connectionId == (Just connId) ->
-              let model' = model & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                                 & (document . inflightPatch) .~ (Patch.fromList [])
-                                 & (document . forkedAt) .~ patchId
+              let model' = updateLayout $
+                             model & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                                   & (document . inflightPatch) .~ (Patch.fromList [])
+                                   & (document . forkedAt) .~ patchId
               in (model', Nothing) -- got our own patch back
 
             | otherwise              -> -- FIXME: probably need to call transform on the patch in progress
@@ -779,7 +794,7 @@ update' action ioData model'' =
                     newCaret = if maxEditPos newPatch < (model ^. caret)
                                then (model ^. caret) + patchDelta (newPatch)
                                else (model ^. caret)
-                in (model' {- & caret .~ newCaret -}, Nothing)
+                in (model' & caret .~ newCaret, Nothing)
           (ResInit conn initPatches) ->
             (updateLayout $ model & connectionId .~ Just conn
                                   & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics))

@@ -105,7 +105,7 @@ handleReq tvServerState connection connectionId (WebSocketReq req) =
               let serverPatch = mconcat (Foldable.toList $ Seq.drop (forkedAt + 1) (patches d))
                   (_, newPatch) = transformWith merge serverPatch patchCandidate
                   doc' = d { patches = (patches d) |> newPatch }
-                  i    = Seq.length (patches d) - 1
+                  i    = Seq.length (patches doc') - 1
               writeTVar tvServerState  (ss { document = doc'})
               pure (c, (i, newPatch))
          let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResAppendPatch connectionId r)))
