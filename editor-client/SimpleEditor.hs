@@ -81,8 +81,6 @@ fontWeightJS weight =
     FW700 -> "700"
     FW800 -> "800"
     FW900 -> "900"
--- type TextBox  = Box Text Text
--- type ImageBox = Box Image Image
 
 data SelectionData = SelectionData
   { _selection       :: Selection
@@ -114,16 +112,12 @@ flattenDocument doc =
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _document      :: Document -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
---  , _patches       :: [Patch Atom]
---  , _currentEdit   :: [Edit Atom]
---  , _othersEdits   :: Map UserId [Edit Atom]
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
   , _index         :: Index -- ^ current index for patch edit operations
   , _caret         :: Index -- ^ position of caret
   , _fontMetrics   :: FontMetrics
   , _currentFont   :: Font
---  , _measureElem   :: Maybe JSElement
   , _debugMsg      :: Maybe Text
   , _mousePos      :: Maybe (Double, Double)
   , _editorPos     :: Maybe DOMClientRect
@@ -132,7 +126,6 @@ data Model = Model
   , _maxWidth      :: Double
   , _selectionData :: Maybe SelectionData
   , _userId        :: UserId
---   , _now           :: POSIXTime
   , _lastActivity  :: POSIXTime
   }
 makeLenses ''Model
@@ -170,22 +163,6 @@ data EditAction
   | MoveCaret Index
     deriving Show
 
-{-
-calcSizes :: [[TextBox]] -> VBox [HBox [TextBox]]
-calcSizes [] = Box 0 0 []
-calcSizes (line:lines) =
-  mkBox (mkBox line : calcSizes lines)
-  where
---    mkBox :: forall c. [TextBox] -> Box c [TextBox]
-    mkBox :: [a] -> Box c [a]
-    mkBox [] = Box 0 0 []
-    mkBox boxes =
-      Box { _boxWidth   = sum (map _boxWidth boxes)
-          , _boxHeight  = maximum (map _boxHeight boxes)
-          , _boxContent = boxes
-          }
--}
-
 calcSizes :: [[AtomBox]] -> VBox [HBox [AtomBox]]
 calcSizes [] = Box 0 0 []
 calcSizes lines =
@@ -221,19 +198,6 @@ textToBox fm input
     getWidth, getHeight :: FontMetrics -> RichChar -> Double
     getWidth  fm c = maybe 0 fst (Map.lookup c fm)
     getHeight fm c = maybe 0 snd (Map.lookup c fm)
-{-
--- | similar to words except whitespace is preserved at the end of a word
-textToWords :: Text -> [Text]
-textToWords txt
-  | Text.null txt = []
-  | otherwise =
-      let whiteIndex   = fromMaybe 0 $ findIndex (\c -> c ==' ') txt
-          charIndex    = fromMaybe 0 $ findIndex (\c -> c /= ' ') (Text.drop whiteIndex txt)
-      in case whiteIndex + charIndex of
-          0 -> [txt]
-          _ -> let (word, rest) = Text.splitAt (whiteIndex + charIndex) txt
-               in (word : textToWords rest)
--}
 
 -- | similar to words except whitespace is preserved at the end of a word
 richCharsToWords :: [RichChar] -> [[RichChar]]
@@ -259,12 +223,6 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
       [box] : layoutBoxes maxWidth (0, boxes)
   | otherwise =
       ([]:layoutBoxes maxWidth (0, box:boxes))
-{-
-textToLines :: FontMetrics -> Double -> Int -> Text -> VBox [HBox [AtomBox]]
-textToLines fm maxWidth caret txt =
-  let boxes = map (textToBox fm) (textToWords txt)
-  in calcSizes $ layoutBoxes maxWidth (0, boxes)
--}
 
 -- | 
 -- FIXME: should probably use a fold or something
@@ -296,7 +254,6 @@ calcLayout :: Model
            -> VBox [HBox [AtomBox]]
 calcLayout model =
   atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (flattenDocument $ model ^. document)
---    (safeApply (Patch.fromList $ model ^. currentEdit) (foldr (\edits doc -> safeApply (Patch.fromList edits) doc) (model ^. document) (Map.elems (model ^. othersEdits))))
 
 updateLayout :: Model -> Model
 updateLayout m = m { _layout = calcLayout m }
@@ -308,13 +265,9 @@ insertChar atom model =
   let newEdit =  (model ^. document ^. pendingEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
   in
      (updateLayout $ model { _document = (model ^. document) & pendingEdit .~ newEdit
---        , _index    = model ^. index
          , _caret       = succ (model ^. caret)
---         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
-  --       , _layout      = textToLines (model ^. fontMetrics) (model ^. maxWidth) 2 $ Text.pack $ Vector.toList (apply (Patch.fromList newEdit) (model ^. document))
-         }, Nothing) -- Just $ [WebSocketReq (model ^. userId) (ReqUpdateCurrent newEdit)])
+         }, Nothing)
 
--- in --  newDoc =   (model ^. document) ++ [Delete (model ^. index) ' '] -- FIXME: won't work correctly if converted to a replace
 backspaceChar :: Model -> (Model, Maybe [WebSocketReq])
 backspaceChar model
  | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
@@ -326,8 +279,7 @@ backspaceChar model
        model {  _document = (model ^. document) & pendingEdit .~ newEdit
              , _index       = pred (model ^. index)
              , _caret       = pred (model ^. caret)
-  --         , _layout      = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply (Patch.fromList newEdit) (model ^. document))
-             }, Nothing) -- Just $ [WebSocketReq (model ^. userId) (ReqUpdateCurrent newEdit)])
+             }, Nothing)
  | otherwise = (model, Nothing)
 
 handleAction :: EditAction -> Model -> (Model, Maybe [WebSocketReq])
@@ -337,13 +289,8 @@ handleAction ea model
        InsertAtom c -> insertChar c model
        DeleteAtom ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
---             newPatches = (model ^. patches) ++ [newPatch]
---             newDoc     = safeApply newPatch (model ^. document)
              model'     = model { _document    = (model ^. document) & inflightPatch .~ newPatch
                                                                      & pendingEdit   .~ []
---                                                       & (document . pendingEdit)   .~ []
---                                , _patches     = newPatches
---                                , _currentEdit = []
                                 , _editState   = Deleting
                                 , _index       = model ^. caret
                                 }
@@ -351,12 +298,8 @@ handleAction ea model
          in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
---             newPatches = (model ^. patches) ++ [newPatch]
---             newDoc     = safeApply newPatch (model ^. document)
              model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
                                                                       & pendingEdit   .~ []
---                                 , _patches     = newPatches
-  --                               , _currentEdit = []
                                   , _editState   = MovingCaret
                                   }
              (model'', mwsq) = handleAction ea model'
@@ -367,15 +310,6 @@ handleAction ea model
        DeleteAtom -> backspaceChar model
        InsertAtom _ ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
---             newPatches = (model ^. patches) ++ [newPatch]
---             newDoc     = safeApply newPatch (model ^. document)
-{-
-             model'     = model { -- _document = newDoc
---                                , _patches  = newPatches
---                                , _currentEdit = []
-                                  _editState   = Inserting
-                                }
--}
              model' = model & (document . inflightPatch) .~ newPatch
                             & (document . pendingEdit) .~ []
                             & editState .~ Inserting
@@ -384,27 +318,13 @@ handleAction ea model
 
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
---             newPatches = (model ^. patches) ++ [newPatch]
---             newDoc     = safeApply newPatch (model ^. document)
              model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
                                                                       & pendingEdit   .~ []
---                                 , _patches     = newPatches
-  --                               , _currentEdit = []
                                   , _editState   = MovingCaret
                                   }
              (model'', mwsq) = handleAction ea model'
          in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
-{-         
-         let -- newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
---             newPatches = (model ^. patches) ++ [newPatch]
---             newDoc     = safeApply newPatch (model ^. document)
-             model'     = model { -- _document    = newDoc
---                                , _patches     = newPatches
---                                , _currentEdit = []
-                                 _editState   = MovingCaret
-                                }
-         in handleAction ea model'
--}
+
   | model ^. editState == MovingCaret =
       case ea of
        MoveCaret i ->
@@ -415,17 +335,6 @@ handleAction ea model
          handleAction ea (model { _editState = Inserting })
        DeleteAtom {} ->
          handleAction ea (model { _editState = Deleting })
-
-{-
-relativeClickPos model =
-  let mepos = model ^. editorPos in
-   case mepos of
-    Nothing -> Nothing
-    (Just epos) ->
-      case model ^. mousePos of
-       Nothing -> Nothing
-      (Just (mx, my)) -> Just (mx - (rectLeft epos), my - (rectTop epos))
--}
 
 -- | convert from window(?) coordinates to coordinates relative to the
 -- top, left corner of the editor div.
@@ -575,19 +484,6 @@ browserIO' queue action model =
                         | otherwise -> pure Map.empty
                       (WSRes wsres) ->
                         case wsres of
-{-
-                          (ResUpdateCurrent uid edits)
-                            | model ^. userId == uid -> pure Map.empty
-                            | otherwise              -> let toRCs :: Atom -> [RichChar]
-                                                            toRCs (Img {})      = []
-                                                            toRCs (RC rc) = [rc]
-                                                            toRCs (RT rt) = richTextToRichChars rt
-                                                            toRCs' :: Edit Atom -> [RichChar]
-                                                            toRCs' (Insert _ a) = toRCs a
-                                                            toRCs' (Delete _ _) = []
-                                                            toRCs' (Replace _ _ a) = toRCs a
-                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' edits)
--}
                           (ResAppendPatch connId (_, patch))
                             | model ^. connectionId == (Just connId) -> pure Map.empty
                             | otherwise              -> let toRCs :: Atom -> [RichChar]
@@ -617,23 +513,7 @@ browserIO' queue action model =
                            targetRect <- getBoundingClientRect elem
                            pure (Just $ targetRect)
                       _ -> pure Nothing
-{-
-     mMeasureElem <- case action of
-                      UpdateMetrics ->
-                        do case model ^. measureElem of
-                             Nothing -> do
-                               (Just document) <- currentDocument
-                               getElementById document "measureElement"
-                             Just {} -> pure Nothing
 
-              case mme of
-                Nothing -> pure (model { _debugMsg = Just "Could not find measureElement" }, Nothing)
-                (Just me) ->
-                  do let model' = model & measureElem .~ (Just me)
-                     doMetrics model' me
-            (Just me) -> doMetrics model me
--}
---     when (now' >= (model ^. lastActivity) + 1) (atomically $ writeTQueue queue ActivityTimeout)
      case action of
        ActivityTimeout ->do cb <- asyncCallback $ atomically $ writeTQueue queue ActivityTimeout
                             js_setTimeout cb 2000
@@ -717,67 +597,10 @@ update' action ioData model'' =
                (Just i) -> handleAction (MoveCaret i) model'
                Nothing  -> (model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click."), Nothing)
 
-{-
-        do elem <- target e
-{-
-         (Just doc) <- currentDocument
-         (Just editorElem) <- getElementById doc "editor"
-         rect <- getBoundingClientRect editorElem
--}
-
-           targetRect <- getBoundingClientRect elem
-           {-
-           let highlightLine (Just n) lines = lines & ix n %~ lineHighlight .~ True
-               highlightLine Nothing lines = lines
-               (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-             -}
-           let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-               mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
-               model' = model & mousePos ?~ (clientX e, clientY e)
-                              & caret .~ (fromMaybe (model ^. caret) mIndex)
-                              & targetPos ?~ targetRect
-           case mIndex of
-            (Just i) -> pure (handleAction (MoveCaret i) model', Nothing)
-            Nothing  -> pure (model', Nothing)
-
---              & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
---                       & layout .~ highlightLine (lineAtY (model ^. layout) y) (map (\l -> l & lineHighlight .~ False) (model ^. layout))
---                , Nothing)
--}
       UpdateMetrics -> (model, Nothing)
-        {-
-        do case model ^. measureElem of
-            Nothing -> do
-              (Just document) <- currentDocument
-              mme <- getElementById document "measureElement"
-              case mme of
-                Nothing -> pure (model { _debugMsg = Just "Could not find measureElement" }, Nothing)
-                (Just me) ->
-                  do let model' = model & measureElem .~ (Just me)
-                     doMetrics model' me
-            (Just me) -> doMetrics model me
-        where
-          doMetrics model me = pure (model, Nothing)
-          {-
-            do metrics <- mapM (getFontMetric me) [ RichChar (model ^. currentFont) c | c <- [' ' .. '~']]
-               pure $ (model & fontMetrics .~ (Map.fromList metrics) {- & debugMsg .~ (Just $ Text.pack $ show metrics) -}, Nothing)
-           -}
-       -}
 
       WSRes wsres ->
         case wsres of
-{-
-          (ResUpdateCurrent uid edits)
-            | model ^. userId == uid -> (model, Nothing)
-            | otherwise              ->
-                let foreignPatch = Patch.fromList edits
-                    model' = updateLayout (set (othersEdits . at uid) (Just edits) (model & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics))))
---                    newLayout = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (apply foreignPatch (model ^. document))
-                    newCaret = if maxEditPos foreignPatch < (model' ^. caret)
-                               then (model' ^. caret) + patchDelta foreignPatch
-                               else (model' ^. caret)
-                in (set caret newCaret $ model', Nothing)
--}
           (ResAppendPatch connId (patchId, newPatch))
             | model ^. connectionId == (Just connId) ->
               let model' = updateLayout $
@@ -802,56 +625,6 @@ update' action ioData model'' =
                                   & (document . inflightPatch) .~ (Patch.fromList [])
                                   & (document . forkedAt) .~ (Seq.length initPatches - 1)
                                   & (document . pendingEdit) .~ [], Nothing)
-
---                    model' = updateLayout (set (othersEdits . at uid) Nothing (model & fontMetrics %~ (\old -> old `mappend` (ioData ^. newFontMetrics)))
---                    model' = updateLayout (set (othersEdits . at uid) Nothing (model & fontMetrics %~ (\old -> old `mappend` ioData newFontMetrics))
---                    newLayout    = atomsToLines (model ^. fontMetrics) (model ^. maxWidth) newDoc
-{-
-                in (set caret newCaret $
-                    set document newDoc model, Nothing)
--}
-
-{-
-textToBox :: FontMetrics -> Text -> TextBox
-textToBox fm input
-  | Text.null input = Box { _boxWidth     = 0
-                          , _boxHeight    = 0
-                          , _boxContent   = input
-                          , _boxHighlight = False
-                          }
-  | otherwise =
-      Box { _boxWidth     = Text.foldr (\c w -> w + getWidth fm c) 0 input
-          , _boxHeight    = getHeight fm (Text.head input)
-          , _boxContent   = input
-          , _boxHighlight = False
-          }
-  where
-    getWidth, getHeight :: FontMetrics -> Char -> Double
-    getWidth  fm c = maybe 0 fst (Map.lookup c fm)
-    getHeight fm c = maybe 0 snd (Map.lookup c fm)
--}
-
-{-
--- foldl :: Foldable t => (b -> a -> b) -> b -> t a -> b
--- foldr :: Foldable t => (a -> b -> b) -> b -> t a -> b
-
--- | FIXME: possibly not tail recursive -- should probably use foldr or foldl'
-layoutBoxes :: Double -> (Double, [Box a]) -> [[Box a]]
-layoutBoxes maxWidth (currWidth, []) = []
-layoutBoxes maxWidth (currWidth, (box:boxes))
-  | currWidth + (box ^. boxWidth) <= maxWidth =
-      case layoutBoxes maxWidth ((currWidth + (box ^. boxWidth)), boxes) of
-       [] -> [[box]] -- this is the last box
-       (line:lines) -> (box:line):lines
-  -- if a box is longer than the maxWidth we will place it at the start of a line and let it overflow
-  | (currWidth == 0) && (box ^. boxWidth > maxWidth) =
-      [box] : layoutBoxes maxWidth (0, boxes)
-  | otherwise =
-      ([]:layoutBoxes maxWidth (0, box:boxes))
-
-
--}
-
 
 -- | calculate tho CSS value for a 'Font'
 fontToStyle :: Font -> Text
@@ -887,19 +660,6 @@ renderAtomBoxes' box =
 renderAtomBoxes :: VBox [HBox [AtomBox]] -> HTML Action
 renderAtomBoxes lines =
   [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
-
-{-
- linesToHTML :: VBox [HBox [AtomBox]] -> HTML Action
- linesToHTML lines = renderAtomBoxes lines
--}
-{-
-textToHTML :: FontMetrics -> Double -> Int -> Text -> HTML Action
-textToHTML fm maxWidth caret txt =
-  let boxes = map (textToBox fm) (textToWords txt)
-      boxes' = boxes & ix caret %~ boxHighlight .~ True
-  in
-   renderTextBoxes (layoutBoxes maxWidth (0, boxes'))
--}
 
 -- render a layout (vertical list of horizontal lists of AtomBoxes) to HTML
 renderLayout :: VBox [HBox [AtomBox]]
@@ -996,13 +756,6 @@ caretPos model (Just (x, y, height)) =
                              "px;"
                              )
                 ]
--- Event -> EIO Action
-{-
-<div> Click event
- <button onClick=Increment>+</button>
- <button onClick=Decrement>-</button>
-</div>
--}
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
@@ -1086,16 +839,12 @@ editorMUV =
                                                    , _forkedAt = 0
                                                    , _pendingEdit = []
                                                    }
---                       , _patches       = []
---                       , _currentEdit   = []
---                       , _othersEdits   = Map.empty
                        , _connectionId  = Nothing
                        , _editState     = Inserting
                        , _index         = 0
                        , _caret         = 0
                        , _fontMetrics   = Map.empty
                        , _currentFont   = defaultFont
---                       , _measureElem   = Nothing
                        , _debugMsg      = Nothing
                        , _mousePos      = Nothing
                        , _editorPos     = Nothing
@@ -1104,7 +853,6 @@ editorMUV =
                        , _maxWidth      = 300
                        , _selectionData = Nothing
                        , _userId        = UserId 0
---                       , _now           = 0
                        , _lastActivity  = 0
                        }
       , browserIO = browserIO'
@@ -1123,6 +871,4 @@ decodeRes messageEvent =
 main :: IO ()
 main =
   muvWS editorMUV "ws://localhost:8000/editor/websockets" decodeRes (Just Init)
-
--- main = pure ()
 
