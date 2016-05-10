@@ -141,6 +141,7 @@ richTextToRichChars (RichText texts) =
 data Box c a = Box
   { _boxWidth     :: Double
   , _boxHeight    :: Double
+  , _boxLineBreak :: Bool
   , _boxContent   :: a
   }
   deriving (Eq, Show)
@@ -160,6 +161,7 @@ data Atom
   | RT RichText
   | Img Image
   | Conflict Atom Atom
+  | LineBreak
     deriving (Eq, Show)
 deriveJSON defaultOptions ''Atom
 
@@ -173,10 +175,13 @@ isRichChar _             = False
 unRichChar :: Atom -> RichChar
 unRichChar (RC rc) = rc
 
+-- | length here is a measure of ??
 atomLength :: Atom -> Int
 atomLength (RC {})  = 1
 atomLength (RT (RichText txts)) = sum (map (Text.length . snd) txts)
 atomLength (Img {})       = 1
+atomLength LineBreak = 1 -- FIXME: or is it zero?
+atomLength (Conflict atom1 atom2) = atomLength atom1 + atomLength atom2
 
 type AtomBox  = Box Singleton Atom
 

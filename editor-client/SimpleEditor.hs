@@ -164,7 +164,7 @@ data EditAction
     deriving Show
 
 calcSizes :: [[AtomBox]] -> VBox [HBox [AtomBox]]
-calcSizes [] = Box 0 0 []
+calcSizes [] = Box 0 0 False []
 calcSizes lines =
   mkHBox (map mkHBox lines)
 --  mkVBox [] -- (mkHBox line : calcSizes lines)
@@ -174,6 +174,7 @@ calcSizes lines =
     mkHBox boxes =
       Box { _boxWidth   = sum (map _boxWidth boxes)
           , _boxHeight  = maximum (map _boxHeight boxes)
+          , _boxLineBreak = True
           , _boxContent = boxes
           }
 
@@ -187,11 +188,13 @@ textToBox :: FontMetrics
 textToBox fm input
   | null (input ^. text) = Box { _boxWidth   = 0
                                , _boxHeight  = 0
+                               , _boxLineBreak = False
                                , _boxContent = RT input
                                }
   | otherwise =
       Box { _boxWidth     = foldr (\(f,txt) w' -> Text.foldr (\c w -> w + getWidth fm (RichChar f c)) w' txt) 0 (input ^. text)
           , _boxHeight    = maximum (map (getHeight fm) [ RichChar f (Text.head txt) | (f, txt) <- input ^. text ])
+          , _boxLineBreak = False
           , _boxContent   = RT input
           }
   where
@@ -214,6 +217,8 @@ richCharsToWords txt =
 layoutBoxes :: Double -> (Double, [Box c a]) -> [[Box c a]]
 layoutBoxes maxWidth (currWidth, []) = []
 layoutBoxes maxWidth (currWidth, (box:boxes))
+  | box ^. boxLineBreak =
+      [] : layoutBoxes maxWidth (0, (box & boxLineBreak .~ False):boxes)
   | currWidth + (box ^. boxWidth) <= maxWidth =
       case layoutBoxes maxWidth ((currWidth + (box ^. boxWidth)), boxes) of
        [] -> [[box]] -- this is the last box
@@ -238,7 +243,9 @@ boxify fm v
           (richChars, rest) ->
             (map (textToBox fm) $ map richCharsToRichText $ richCharsToWords $ (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
       atom@(Img img) ->
-        (Box (img ^. imageWidth) (img ^. imageHeight) atom) : boxify fm (Vector.tail v)
+        (Box (img ^. imageWidth) (img ^. imageHeight) False atom) : boxify fm (Vector.tail v)
+      LineBreak ->
+        (Box 0 18 True LineBreak : boxify fm (Vector.tail v)) -- FIXME: height should probably be the height of a space char?
       atom -> error $ "boxify does not handle this atom yet: " ++ show atom
 
 atomsToLines :: FontMetrics
@@ -379,6 +386,8 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
         (Img img)
          | x < (box ^. boxWidth) -> i
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
+        LineBreak
+         -> go boxes x (i + 1)
 
 -- | calculate the index to Atom in the document which is the hit
 -- target of the provided (x,y) coordinates
@@ -488,6 +497,7 @@ browserIO' queue action model =
                             | model ^. connectionId == (Just connId) -> pure Map.empty
                             | otherwise              -> let toRCs :: Atom -> [RichChar]
                                                             toRCs (Img {})      = []
+                                                            toRCs (LineBreak)   = []
                                                             toRCs (RC rc) = [rc]
                                                             toRCs (RT rt) = richTextToRichChars rt
                                                             toRCs' :: Edit Atom -> [RichChar]
@@ -498,6 +508,7 @@ browserIO' queue action model =
                           (ResInit connectionId patches) ->
                             let toRCs :: Atom -> [RichChar]
                                 toRCs (Img {})      = []
+                                toRCs (LineBreak)   = []
                                 toRCs (RC rc) = [rc]
                                 toRCs (RT rt) = richTextToRichChars rt
                                 toRCs' :: Edit Atom -> [RichChar]
@@ -579,6 +590,7 @@ update' action ioData model'' =
       -- used for handling special cases like backspace, space
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> handleAction DeleteAtom model
+        | c == 13   -> handleAction (InsertAtom LineBreak) model
         | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
                            model' = case Map.lookup rc (ioData ^. newFontMetrics) of
                              Nothing -> model
@@ -636,7 +648,6 @@ fontToStyle font =
                           Italic  -> "italic;"
                           Oblique -> "oblique;")
 
-
 -- | convert an 'AtomBox' to HTML
 renderAtomBox :: AtomBox
               -> [HTML Action]
@@ -644,7 +655,8 @@ renderAtomBox :: AtomBox
 renderAtomBox box =
   case box ^. boxContent of
     (RT (RichText txts)) -> map renderText txts
-    (Img img)       -> [[hsx| <img src=(img ^. imageUrl) /> |]]
+    (Img img)            -> [[hsx| <img src=(img ^. imageUrl) /> |]]
+    LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]]
   where
     renderText :: (Font, Text) -> HTML Action
     renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
@@ -673,6 +685,7 @@ renderLayout lines =
 --      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
     </div>
   |]
+{-
   where
     rlines :: String -> [String]
     rlines l =
@@ -681,7 +694,7 @@ renderLayout lines =
        [] -> [b]
        [c] -> b : [""]
        (_:cs) -> b : rlines cs
-
+-}
 -- | calculate the x offset from the left side of an AtomBox to the
 -- right side of the element at position specified by the index into
 -- the AtomBox.
@@ -699,6 +712,7 @@ indexToPosAtom index fm box =
       | otherwise ->
         Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
     (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
+    LineBreak -> Just 0 -- FIXME: do we have to account for the fact that we should be at a newline now?
   where
     sumWidth c acc =
       case Map.lookup c fm of
@@ -710,7 +724,7 @@ indexToPosAtom index fm box =
 indexToPos :: Int
            -> Model
            -> Maybe (Double, Double, Double)
-indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,0)
+indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,18) -- FIMXE: maybe shouldn't hardcode to 18
   where
     -- go over the lines
     go [] _ _  = Nothing
@@ -759,20 +773,20 @@ caretPos model (Just (x, y, height)) =
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
-  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32) (preventDefault e) >> pure (KeyDowned (keyCode e)))
+  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13) (preventDefault e) >> pure (KeyDowned (keyCode e)))
       keyPressEvent    = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
       clickEvent       = Event Click    (\e -> pure (MouseClick e))
       copyEvent        = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
       pasteEvent       = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
       addImage         = Event Click    (\e -> pure AddImage)
-      increaseFontSize = Event Click (\e -> pure IncreaseFontSize)
-      decreaseFontSize = Event Click (\e -> pure DecreaseFontSize)
-      toggleBold       = Event Click (\e -> pure ToggleBold)
+      increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
+      decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
+      toggleBold       = Event Click    (\e -> pure ToggleBold)
       incUserId        = Event Click    (\e -> pure IncUserId)
   in
          ([hsx|
            <div>
---            <p><% show (Patch.fromList (model ^. document)) %></p>
+--            <p><% show ( (model ^. layout)) %></p>
 
 --            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
 --            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
@@ -787,8 +801,6 @@ view' model =
 --                             <p>Patches:  <% show (model  ^. patches) %></p>
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
-                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
-
                              <p>mousePos: <% show (model ^. mousePos) %></p>
                              <p>editorPos: <% let mpos = model ^. editorPos in
                                               case mpos of
@@ -815,6 +827,8 @@ view' model =
                                         <p>Selection: toString()=<% selectionData ^. selectionString %></p>
                                        </div>
                                 %>
+                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+
                       </div>
                  else <span></span> %>
 
@@ -849,7 +863,7 @@ editorMUV =
                        , _mousePos      = Nothing
                        , _editorPos     = Nothing
                        , _targetPos     = Nothing
-                       , _layout        = Box 0 0 []
+                       , _layout        = Box 0 0 False []
                        , _maxWidth      = 300
                        , _selectionData = Nothing
                        , _userId        = UserId 0
