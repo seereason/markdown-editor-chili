@@ -150,7 +150,10 @@ data Action
     | AddImage
     | IncreaseFontSize
     | DecreaseFontSize
+    | SetFontSize EventObject
     | ToggleBold
+    | BoldChange MouseEventObject
+    | ItalicChange MouseEventObject
     | IncUserId
     | WSRes WebSocketRes
     | Init
@@ -229,7 +232,7 @@ layoutBoxes maxWidth (currWidth, (box:boxes))
   | otherwise =
       ([]:layoutBoxes maxWidth (0, box:boxes))
 
--- | 
+-- |
 -- FIXME: should probably use a fold or something
 boxify :: FontMetrics
        -> Vector Atom
@@ -570,13 +573,15 @@ update' action ioData model'' =
       AddImage         ->  handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model
       IncreaseFontSize ->  (model & (currentFont . fontSize) %~ succ, Nothing)
       DecreaseFontSize ->  (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
-      ToggleBold       ->  (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
+--      ToggleBold       ->  (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
+      BoldChange e     -> (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange", Nothing)
+      ItalicChange e   -> (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
       IncUserId        ->  (model & userId %~ succ, Nothing)
       CopyA ceo      ->  -- cd <- clipboardData ceo
                            -- setDataTransferData cd "text/plain" "Boo-yeah!"
                          (model & debugMsg .~ Just "copy", Nothing)
       PasteA txt ->  -- txt <- getDataTransferData dt "text/plain"
---                       txt2 <- getClipboardData ceo
+        --                       txt2 <- getClipboardData ceo
 --                       js_alert txt2
                      (model & debugMsg .~ Just (textFromJSString txt), Nothing)
 
@@ -596,6 +601,10 @@ update' action ioData model'' =
                              Nothing -> model
                              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
                        in handleAction (InsertAtom (RC rc)) model'
+        | c == 37   -> handleAction (MoveCaret ((model ^. caret) - 1)) model -- left
+        | c == 38   -> (model, Nothing)                                      -- up
+        | c == 39   -> handleAction (MoveCaret ((model ^. caret) + 1)) model -- right
+        | c == 40   -> (model, Nothing)                                      -- down
         | otherwise -> (model, Nothing)
 
       MouseClick e ->
@@ -773,15 +782,17 @@ caretPos model (Just (x, y, height)) =
 
 view' :: Model -> (HTML Action, [Canvas])
 view' model =
-  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13) (preventDefault e) >> pure (KeyDowned (keyCode e)))
+  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (preventDefault e) >> pure (KeyDowned (keyCode e)))
       keyPressEvent    = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
       clickEvent       = Event Click    (\e -> pure (MouseClick e))
+      boldChange       = Event Click    (\e -> do preventDefault e ; pure (BoldChange e))
+      italicChange     = Event Click    (\e -> do preventDefault e ; pure (ItalicChange e))
       copyEvent        = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
       pasteEvent       = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
       addImage         = Event Click    (\e -> pure AddImage)
       increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
       decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
-      toggleBold       = Event Click    (\e -> pure ToggleBold)
+      setFontSize      = Event Change   (\e -> pure (SetFontSize e))
       incUserId        = Event Click    (\e -> pure IncUserId)
   in
          ([hsx|
@@ -827,16 +838,32 @@ view' model =
                                         <p>Selection: toString()=<% selectionData ^. selectionString %></p>
                                        </div>
                                 %>
-                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+                             <p>Current Font <% show (model ^. currentFont) %></p>
+--                              <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+
 
                       </div>
                  else <span></span> %>
 
             <h1>Editor</h1>
             <button [addImage]>Add Image</button>
+
             <button [increaseFontSize]>+</button>
             <button [decreaseFontSize]>-</button>
-            <button [toggleBold]>Toggle Bold</button>
+            <select class="form-control" [setFontSize] >
+             <option>10</option>
+             <option>12</option>
+             <option>14</option>
+             <option>16</option>
+             <option>18</option>
+            </select>
+--            <button [toggleBold]>Toggle Bold</button>
+            <div class="btn-group" data-toggle="buttons">
+             <label class="btn btn-primary" [boldChange]>
+              <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
+             <label class="btn btn-primary" [italicChange]>
+              <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
+            </div>
             <button [incUserId]>UserId+</button>
             <div id="editor" tabindex="1" style="outline: 0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
               <div id="caret" class="caret" (caretPos model (indexToPos (model ^. caret) model))></div>
@@ -885,4 +912,3 @@ decodeRes messageEvent =
 main :: IO ()
 main =
   muvWS editorMUV "ws://localhost:8000/editor/websockets" decodeRes (Just Init)
-
