@@ -152,7 +152,7 @@ data Action
     | AddImage
     | IncreaseFontSize
     | DecreaseFontSize
-    | SetFontSize EventObject
+    | SetFontSize Double
     | ToggleBold
     | BoldChange MouseEventObject
     | ItalicChange MouseEventObject
@@ -627,6 +627,7 @@ update' action model'' = do
       AddImage         ->  pure $ handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model
       IncreaseFontSize ->  pure (model & (currentFont . fontSize) %~ succ, Nothing)
       DecreaseFontSize ->  pure (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
+      (SetFontSize s)  -> pure (model & (currentFont . fontSize) .~ s, Nothing)
 --      ToggleBold       ->  (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
       BoldChange e     -> pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange", Nothing)
       ItalicChange e   -> pure (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
@@ -853,7 +854,7 @@ view' model =
       addImage         = Event Click    (\e -> pure AddImage)
       increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
       decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
-      setFontSize      = Event Change   (\e -> pure (SetFontSize e))
+      setFontSize n    = Event Click   (\e -> pure (SetFontSize n))
       incUserId        = Event Click    (\e -> pure IncUserId)
   in
          ([hsx|
@@ -865,7 +866,7 @@ view' model =
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
 --            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
              <% if True
-                 then <div style="float: right; width: 800px;">
+                 then <div style="position: absolute; left: 1000px; width: 800px;">
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
                              <p>debugMsg: <% show (model ^. debugMsg) %></p>
@@ -907,32 +908,42 @@ view' model =
                  else <span></span> %>
 
             <h1>Editor</h1>
-            <button [addImage]>Add Image</button>
-
-            <button [increaseFontSize]>+</button>
-            <button [decreaseFontSize]>-</button>
-{-
-            <select class="form-control" [setFontSize] >
-             <option>10</option>
-             <option>12</option>
-             <option>14</option>
-             <option>16</option>
-             <option>18</option>
-            </select>
--}
+            <div class="form-line editor-toolbar row">
+             <div class="col-md-2">
+              <button type="button" class="btn btn-default" [addImage]>Add Image</button>
+--              <button type="button" class="btn btn-default" [increaseFontSize]>+</button>
+--              <button type="button" class="btn btn-default" [decreaseFontSize]>-</button>
+             </div>
+             <div class="col-md-2">
+              <div class="input-group">
+               <div class="input-group-btn">
+                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span class="caret"></span></button>
+                <ul class="dropdown-menu">
+                 <li><a href="#" [setFontSize 10]>10</a></li>
+                 <li><a href="#" [setFontSize 12]>12</a></li>
+                 <li><a href="#" [setFontSize 14]>14</a></li>
+                 <li><a href="#" [setFontSize 16]>16</a></li>
+                 <li><a href="#" [setFontSize 18]>18</a></li>
+                </ul>
+               </div>
+               <input type="text" class="form-control col-xs-1" aria-label="..." value=(Text.pack $ show $ model ^. currentFont ^. fontSize) />
+              </div>
+            </div>
+            <div class="col-md-6">
 --            <button [toggleBold]>Toggle Bold</button>
-            <div class="btn-group" data-toggle="buttons">
-             <label class="btn btn-primary" [boldChange]>
-              <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
-             <label class="btn btn-primary" [italicChange]>
-              <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
+              <div class="btn-group" data-toggle="buttons">
+               <label class="btn btn-default" [boldChange]>
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
+               <label class="btn btn-default" [italicChange]>
+                <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
+              </div>
+--              <button [incUserId]>UserId+</button>
+             </div>
             </div>
-            <button [incUserId]>UserId+</button>
             <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
-              <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-              <% renderLayout (model ^. layout) %>
+               <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
+               <% renderLayout (model ^. layout) %>
             </div>
-
            </div>
           |], [])
 
