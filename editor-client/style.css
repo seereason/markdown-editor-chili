@@ -1,7 +1,7 @@
        @keyframes blinker {
          50% { opacity: 0.0; }
        }
-       .caret {
+       .editor-caret {
          position: absolute;
          height: 18px;
          width: 2px;
