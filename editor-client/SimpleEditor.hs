@@ -28,8 +28,12 @@ import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set, _2)
 import Control.Lens.At (at, ix)
 import Control.Lens.TH (makeLenses)
 import Control.Monad (when)
-import Data.Aeson (decode)
+import Chili.HSX
+import Chili.Loop (loop)
+import Chili.Types
+import           Data.Aeson (FromJSON, ToJSON, decodeStrict, encode)
 import Data.Char (chr)
+import qualified Data.ByteString.Char8 as CS
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Foldable (foldl')
 import qualified Data.JSString as JS
@@ -49,18 +53,27 @@ import qualified Data.Sequence as Seq
 import Data.UserId (UserId(..))
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
+import           GHCJS.Buffer               (toByteString, fromByteString, getArrayBuffer, createFromArrayBuffer)
+import qualified GHCJS.Buffer as Buffer
 import GHCJS.Foreign.Callback (OnBlocked(..), Callback, asyncCallback)
+import           GHCJS.Marshal (FromJSVal(..))
+import           GHCJS.Marshal.Pure (PFromJSVal(..), PToJSVal(..))
+import GHCJS.Types (JSVal(..), isNull, isUndefined)
+import           JavaScript.TypedArray.ArrayBuffer (ArrayBuffer, MutableArrayBuffer)
+import qualified JavaScript.TypedArray.ArrayBuffer as ArrayBuffer
 import JavaScript.Web.MessageEvent (MessageEvent(..), MessageEventData(..))
 import qualified JavaScript.Web.MessageEvent as MessageEvent
-import JavaScript.Web.WebSocket (WebSocketRequest(..), connect, send)
-import Servant.API ()
-import Servant.Isomaniac (HasIsomaniac, MUV(..), ReqAction(..), isomaniac, muv, muvWS, runIdent)
-import Servant.Common.BaseUrl
-import Servant.Common.Req (Req(..))
+import qualified JavaScript.Web.WebSocket as WebSockets
+import JavaScript.Web.WebSocket (WebSocket, WebSocketRequest(..), connect, send)
+
+-- import Servant.API ()
+-- import Servant.Isomaniac (HasIsomaniac, MUV(..), ReqAction(..), isomaniac, muv, muvWS, runIdent)
+-- import Servant.Common.BaseUrl
+-- import Servant.Common.Req (Req(..))
 import Language.Haskell.HSX.QQ (hsx)
 import Web.Editor.API
-import Web.ISO.HSX
-import Web.ISO.Types hiding (Context2D(Font))
+-- import Web.ISO.HSX
+-- import Web.ISO.Types hiding (Context2D(Font))
 import System.IO.Unsafe (unsafePerformIO)
 
 safeApply :: (Eq a) => Patch a -> Vector a -> Vector a
@@ -96,6 +109,7 @@ data Document = Document
   , _forkedAt      :: Int
   , _pendingEdit   :: [Edit Atom]
   }
+  deriving Show
 makeLenses ''Document
 
 flattenDocument :: Document -> Vector Atom
@@ -112,6 +126,7 @@ flattenDocument doc =
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _document      :: Document -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
+  , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
   , _index         :: Index -- ^ current index for patch edit operations
@@ -130,43 +145,14 @@ data Model = Model
   }
 makeLenses ''Model
 
-{-
-data BrowserIO = BrowserIO
-  { _bSelectionData :: Maybe SelectionData
-  , _bEditorPos     :: Maybe DOMClientRect
-  , _mTargetRect    :: Maybe DOMClientRect
-  , _newFontMetrics :: Map RichChar (Double, Double)
-  , _bNow           :: POSIXTime
-  }
-makeLenses ''BrowserIO
--}
-
-data Action
-    = KeyPressed Char
-    | KeyDowned Int
-    | UpdateMetrics
-    | GetMeasureElement
-    | MouseClick MouseEventObject
-    | CopyA ClipboardEventObject
-    | PasteA JS.JSString
-    | AddImage
-    | IncreaseFontSize
-    | DecreaseFontSize
-    | SetFontSize Double
-    | ToggleBold
-    | BoldChange MouseEventObject
-    | ItalicChange MouseEventObject
-    | IncUserId
-    | WSRes WebSocketRes
-    | Init
-    | ActivityTimeout
-    deriving Show
-
 data EditAction
   = InsertAtom Atom
   | DeleteAtom
   | MoveCaret Index
     deriving Show
+
+bullet :: RichText
+bullet = RichText [(defaultFont, " • ")]
 
 calcSizes :: [[AtomBox]] -> VBox [HBox [AtomBox]]
 calcSizes [] = Box 0 0 False []
@@ -222,6 +208,7 @@ richCharsToWords txt =
 layoutBoxes :: Double -> (Double, [Box c a]) -> [[Box c a]]
 layoutBoxes maxWidth (currWidth, []) = []
 layoutBoxes maxWidth (currWidth, (box:boxes))
+  -- handle case were the box starts with a linebreak
   | box ^. boxLineBreak =
       [] : layoutBoxes maxWidth (0, (box & boxLineBreak .~ False):boxes)
   | currWidth + (box ^. boxWidth) <= maxWidth =
@@ -251,6 +238,11 @@ boxify fm v
         (Box (img ^. imageWidth) (img ^. imageHeight) False atom) : boxify fm (Vector.tail v)
       LineBreak ->
         (Box 0 16 True LineBreak : boxify fm (Vector.tail v)) -- FIXME: height should probably be the height of a space char?
+      Item ->
+        let atomBox = (textToBox fm bullet) { _boxLineBreak = True
+                                            , _boxContent = Item
+                                            }
+        in (atomBox : boxify fm (Vector.tail v))
       atom -> error $ "boxify does not handle this atom yet: " ++ show atom
 
 atomsToLines :: FontMetrics
@@ -294,11 +286,11 @@ backspaceChar model
              }, Nothing)
  | otherwise = (model, Nothing)
 
-handleAction :: EditAction -> Model -> (Model, Maybe [WebSocketReq])
-handleAction ea model
+handleAction :: (WebSocketReq -> IO ()) -> EditAction -> Model -> IO (Model, Maybe [WebSocketReq])
+handleAction sendWS ea model
   | model ^. editState == Inserting =
       case ea of
-       InsertAtom c -> insertChar c model
+       InsertAtom c -> pure $ insertChar c model
        DeleteAtom ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
              model'     = model { _document    = (model ^. document) & inflightPatch .~ newPatch
@@ -306,27 +298,30 @@ handleAction ea model
                                 , _editState   = Deleting
                                 , _index       = model ^. caret
                                 }
-             (model'', mwsq) = handleAction DeleteAtom model'
-         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
+         in do (model'', mwsq) <- handleAction sendWS DeleteAtom model'
+               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               pure (model'', Nothing)
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
              model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
                                                                       & pendingEdit   .~ []
                                   , _editState   = MovingCaret
                                   }
-             (model'', mwsq) = handleAction ea model'
-         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
+         in do (model'', mwsq) <- handleAction sendWS ea model'
+               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               pure (model'', Nothing)
 
   | model ^. editState == Deleting =
       case ea of
-       DeleteAtom -> backspaceChar model
+       DeleteAtom -> pure $ backspaceChar model
        InsertAtom _ ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
              model' = model & (document . inflightPatch) .~ newPatch
                             & (document . pendingEdit) .~ []
                             & editState .~ Inserting
-             (model'', mwsq) = handleAction ea model'
-         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
+         in do (model'', mwsq) <- handleAction sendWS ea model'
+               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               pure (model'', Nothing)
 
        MoveCaret {} ->
          let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
@@ -334,19 +329,20 @@ handleAction ea model
                                                                       & pendingEdit   .~ []
                                   , _editState   = MovingCaret
                                   }
-             (model'', mwsq) = handleAction ea model'
-         in (model'', Just $ (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch)) : (fromMaybe [] mwsq))
+         in do (model'', mwsq) <- handleAction sendWS ea model'
+               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               pure (model'', Nothing)
 
   | model ^. editState == MovingCaret =
       case ea of
-       MoveCaret i ->
+       MoveCaret i -> pure $ 
          (updateLayout $ model { _index = i
                                , _caret = i
                                }, Nothing)
        InsertAtom {} ->
-         handleAction ea (model { _editState = Inserting })
+         handleAction sendWS ea (model { _editState = Inserting })
        DeleteAtom {} ->
-         handleAction ea (model { _editState = Deleting })
+         handleAction sendWS ea (model { _editState = Deleting })
 
 -- | convert from window(?) coordinates to coordinates relative to the
 -- top, left corner of the editor div.
@@ -393,6 +389,9 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
         LineBreak
          -> go boxes x (i + 1)
+        Item
+         | x < (box ^. boxWidth) -> i
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
 
 -- | calculate the index to Atom in the document which is the hit
 -- target of the provided (x,y) coordinates
@@ -463,30 +462,184 @@ calcMetrics fm rcs =
         Nothing ->
           do m <- getFontMetric measureElem rc
              pure (Just m)
+
+
+-- | calculate tho CSS value for a 'Font'
+fontToStyle :: Font -> Text
+fontToStyle font =
+  "font-size: " <> Text.pack (show $ font ^. fontSize) <>
+  "px; height: " <> Text.pack (show $ font ^. fontSize) <>
+  "px; font-weight: " <> (fontWeightText $ font ^. fontWeight) <>
+  "; font-style: " <> (case (font ^. fontStyle) of
+                          Normal  -> "normal;"
+                          Italic  -> "italic;"
+                          Oblique -> "oblique;")
+
+-- | convert an 'AtomBox' to Html
+renderAtomBox :: AtomBox
+              -> [Html Model]
+-- renderTextBox box = CDATA True (box ^. boxContent)
+renderAtomBox box =
+  case box ^. boxContent of
+    (RT (RichText txts)) -> map renderText txts
+    (Img img)            -> [[hsx| <img src=(img ^. imageUrl) /> |]]
+    LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]]
+    Item                 -> let (RichText txts) = bullet in map renderText txts
+  where
+    renderText :: (Font, Text) -> Html Model
+    renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
+    nbsp = Text.replace " " (Text.singleton '\160')
+
+-- | convert a horizontal list of 'AtomBom' to Html
+renderAtomBoxes' :: HBox [AtomBox] -> Html Model
+renderAtomBoxes' box =
+    [hsx| <div class=("line"::Text)><% concatMap renderAtomBox (box ^. boxContent)  %></div> |]
+--  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
+
+-- | convert a vertical list of horizontal lists of 'AtomBom' to Html
+renderAtomBoxes :: VBox [HBox [AtomBox]] -> Html Model
+renderAtomBoxes lines =
+  [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
+
+-- render a layout (vertical list of horizontal lists of AtomBoxes) to Html
+renderLayout :: VBox [HBox [AtomBox]]
+          -> Html Model
+renderLayout lines =
+  [hsx|
+    <div data-path="root">
+     <% renderAtomBoxes lines %>
+--        <% textToHtml fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
+--      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
+--      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
+    </div>
+  |]
 {-
-browserIO' :: TQueue Action
-           -> Action
+  where
+    rlines :: String -> [String]
+    rlines l =
+      let (b, a) = break (\c -> c == '\n' || c == '\r') l
+      in case a of
+       [] -> [b]
+       [c] -> b : [""]
+       (_:cs) -> b : rlines cs
+-}
+-- | calculate the x offset from the left side of an AtomBox to the
+-- right side of the element at position specified by the index into
+-- the AtomBox.
+--
+-- Some AtomBoxes only contain a single item (such as an
+-- image). Others contain multiple items -- such as text.
+indexToPosAtom :: Int
+               -> FontMetrics
+               -> AtomBox
+               -> Maybe Double
+indexToPosAtom index fm box =
+  case box ^. boxContent of
+    (RT rt)
+      | richTextLength rt < index -> Nothing
+      | otherwise ->
+        Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
+    (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
+    LineBreak -> Just 0 -- FIXME: do we have to account for the fact that we should be at a newline now?
+    Item      -> Just (box ^. boxWidth)
+  where
+    sumWidth c acc =
+      case Map.lookup c fm of
+        Just (w, _) -> acc + w
+        Nothing -> acc
+
+-- | given an index, calculate its (left, top, height) coordinates in the editor
+--
+indexToPos :: Int
            -> Model
-           -> IO BrowserIO
-browserIO' queue action model =
+           -> Maybe (Double, Double, Double)
+indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: maybe shouldn't hardcode to 16
+  where
+    -- go over the lines
+    go [] _ _  = Nothing
+    go (hbox:hboxes) i curPos =
+      -- walk over the current line
+      case go' (hbox ^. boxContent) (hbox ^. boxHeight) i curPos of
+       -- if the position is in current line, we are done
+       (Right curPos') -> curPos'
+       -- otherwise add the height of that line and start
+       -- looking in the next line
+       (Left (i', (x,y,height))) ->
+         go hboxes i' (0, y + hbox ^. boxHeight, height)
+
+    -- go over the atoms in a line
+--     go' :: [AtomBox] -> Int -> Double -> Either (Int, Double) (Maybe Double)
+    go' [] _ i curPos = Left (i, curPos)
+    go' _ _ 0 curPos = Right (Just curPos)
+    go' (box:boxes) lineHeight i (x,y,height) =
+      -- if the index is greater than the length of the next atom
+      if i > atomLength (box ^. boxContent)
+         -- subtract length of next atom, add width, update height, check next atom
+         then go' boxes lineHeight (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y, box ^. boxHeight)
+         -- if we found the atom we are looking for, look for x position within the atom
+         else case indexToPosAtom i (model ^. fontMetrics) box of
+               Nothing   -> Right Nothing
+               (Just x') ->
+                 let boxForHeight = box
+                     {-
+                       case boxes of
+                         (box':_) -> box'
+                         _        -> box
+-}
+                 in Right (Just (x + x', y + (lineHeight - (boxForHeight ^. boxHeight)), boxForHeight ^. boxHeight))
+
+caretPos :: Model -> Maybe (Double, Double, Double) -> [KV Text Text]
+caretPos model Nothing = []
+caretPos model (Just (x, y, height)) =
+  case model ^. editorPos of
+   Nothing -> []
+   (Just ep) -> ["style" := ("top: "        <> (Text.pack $ show y)      <>
+                             "px; left: "   <> (Text.pack $ show x)      <>
+                             "px; height: " <> (Text.pack $ show height) <>
+                             "px;"
+                             )
+                ]
+
+-- | FIXME: having to call this explicitly is a source of bugs and silly repetition
+updateEditorPos :: Model -> IO Model
+updateEditorPos model =
   do (Just doc)        <- currentDocument
      (Just editorElem) <- getElementById doc "editor"
+     focus editorElem
      rect <- getBoundingClientRect editorElem
-     mSelectionData <- getSelectionData
-     js_focus editorElem
-     now' <- getPOSIXTime
-     nfm <- case action of
-                      (KeyPressed c) -> do
-                        let rc = RichChar (model ^. currentFont) c
-                        case Map.lookup rc (model ^. fontMetrics) of
-                          Nothing ->
-                            do (Just document) <- currentDocument
-                               (Just measureElem) <- getElementById document "measureElement"
-                               (_, metric) <- getFontMetric measureElem rc
-                               pure (Map.singleton rc metric)
-                          Just {} -> pure Map.empty
-                      (KeyDowned c)
-                        | c == 32 -> do
+     pure $ model { _editorPos = Just rect}
+
+
+keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> Model -> IO Model
+keyPressed sendWS e model'' =
+  do model <- updateEditorPos model''
+     let c = chr (charCode e)
+         rc = RichChar (model ^. currentFont) c
+     putStrLn $ "KeyPressed "++[c]
+     newFontMetrics <-
+       case Map.lookup rc (model ^. fontMetrics) of
+         Nothing ->
+           do (Just document) <- currentDocument
+              (Just measureElem) <- getElementById document "measureElement"
+              (_, metric) <- getFontMetric measureElem rc
+              pure (Map.singleton rc metric)
+         Just {} -> pure Map.empty
+     let model' = case Map.lookup rc newFontMetrics of
+                      Nothing -> model
+                      (Just metric) -> set (fontMetrics . at rc) (Just metric) model
+     fst <$> handleAction sendWS (InsertAtom (RC rc)) model'
+
+keyDowned :: (WebSocketReq -> IO ())
+          -> KeyboardEventObject
+          -> Model
+          -> IO Model
+keyDowned sendWS e model =
+ do putStrLn $ "KeyDowned "++ (show $ keyCode e)
+    let c = (keyCode e)
+    when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (putStrLn "preventDefault" >> preventDefault e)
+    newFontMetrics <-
+       case () of
+         () | c == 32 -> do
                           let rc = RichChar (model ^. currentFont) ' '
                           case Map.lookup rc (model ^. fontMetrics) of
                                 Nothing ->
@@ -495,61 +648,469 @@ browserIO' queue action model =
                                      (_, metric) <- getFontMetric measureElem rc
                                      pure (Map.singleton rc metric)
                                 Just {} -> pure Map.empty
-                        | otherwise -> pure Map.empty
-                      (WSRes wsres) ->
-                        case wsres of
-                          (ResAppendPatch connId (_, patch))
-                            | model ^. connectionId == (Just connId) -> pure Map.empty
-                            | otherwise              -> let toRCs :: Atom -> [RichChar]
-                                                            toRCs (Img {})      = []
-                                                            toRCs (LineBreak)   = []
-                                                            toRCs (RC rc) = [rc]
-                                                            toRCs (RT rt) = richTextToRichChars rt
-                                                            toRCs' :: Edit Atom -> [RichChar]
-                                                            toRCs' (Insert _ a) = toRCs a
-                                                            toRCs' (Delete _ _) = []
-                                                            toRCs' (Replace _ _ a) = toRCs a
-                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList patch))
-                          (ResInit connectionId patches) ->
-                            let toRCs :: Atom -> [RichChar]
-                                toRCs (Img {})      = []
-                                toRCs (LineBreak)   = []
-                                toRCs (RC rc) = [rc]
-                                toRCs (RT rt) = richTextToRichChars rt
-                                toRCs' :: Edit Atom -> [RichChar]
-                                toRCs' (Insert _ a) = toRCs a
-                                toRCs' (Delete _ _) = []
-                                toRCs' (Replace _ _ a) = toRCs a
-                            in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList patches))
+            | otherwise -> pure Map.empty
+    fmap fst $ case () of
+     () | c == 8    -> handleAction sendWS DeleteAtom model
+        | c == 13   -> case model ^. itemizing of
+                         False -> handleAction sendWS (InsertAtom LineBreak) model
+                         True  -> handleAction sendWS (InsertAtom Item) model
+        | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
+                           model' = case Map.lookup rc newFontMetrics of
+                             Nothing -> model
+                             (Just metric) -> set (fontMetrics . at rc) (Just metric) model
+                       in handleAction sendWS (InsertAtom (RC rc)) model'
+        | c == 37   -> handleAction sendWS (MoveCaret ((model ^. caret) - 1)) model -- left
+        | c == 38   -> pure $ (model, Nothing)                                      -- up
+        | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
+        | c == 40   -> pure $ (model, Nothing)                                      -- down
+        | otherwise -> pure $ (model, Nothing)
 
-                      _ -> pure Map.empty
-     mTargetRect <- case action of
-                      (MouseClick e) ->
-                        do elem <- target e
-                           targetRect <- getBoundingClientRect elem
-                           pure (Just $ targetRect)
-                      _ -> pure Nothing
+clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO Model
+clickEditor sendWS e model'' =
+  do model <- updateEditorPos model''
+     let elem = target e
+     targetRect <- getBoundingClientRect elem
+     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         model' = model & mousePos  ?~ (clientX e, clientY e)
+                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & targetPos .~ (Just targetRect)
+                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+     case mIndex of
+       (Just i) -> fst <$> handleAction sendWS (MoveCaret i) model'
+       Nothing  -> pure $ fst $ (model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click."), Nothing)
 
-     case action of
-       ActivityTimeout ->do cb <- asyncCallback $ atomically $ writeTQueue queue ActivityTimeout
-                            js_setTimeout cb 2000
-       Init -> do cb <- asyncCallback $ atomically $ writeTQueue queue ActivityTimeout
-                  js_setTimeout cb 1000
-       _ -> pure ()
-     pure $ BrowserIO { _bSelectionData = mSelectionData
-                      , _bEditorPos     = Just rect
-                      , _mTargetRect    = mTargetRect
-                      , _newFontMetrics = nfm
-                      , _bNow           = now'
-                      }
+boldChange :: MouseEventObject -> Model -> IO Model
+boldChange e model =
+  do preventDefault e
+     pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
+
+italicChange :: MouseEventObject -> Model -> IO Model
+italicChange e model =
+  do preventDefault e
+     pure $ fst $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
+
+itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO Model
+itemize sendWS e model =
+  do preventDefault e
+     case model ^. itemizing of
+       False -> fst <$> handleAction sendWS (InsertAtom Item) (model & itemizing .~ True)
+       True  -> pure $ fst $ (model & itemizing .~ False, Nothing)
+
+editorCopy :: ClipboardEventObject -> Model -> IO Model
+editorCopy e model =
+  do preventDefault e
+     dt <- clipboardData e
+     setDataTransferData dt "text/plain" "boo-yeah"
+     pure $ model & debugMsg .~ Just "copy"
+
+app :: (WebSocketReq -> IO ()) -> Model -> Html Model
+app sendWS model =
+  let setFontSize s = EL Click (\e m -> pure $ m & (currentFont . fontSize) .~ s)
+  in
+         ([hsx|
+           <div>
+             <% if True
+                 then <div style="position: absolute; left: 800px; width: 800px;">
+                             <h1>Debug</h1>
+                             <p>userId: <% show (model ^. userId) %></p>
+                             <p>debugMsg: <% show (model ^. debugMsg) %></p>
+                             <p>Document: <% show (model ^. document) %></p>
+--                             <p>Patches:  <% show (model  ^. patches) %></p>
+                             <p>Index: <% show (model ^. index) %></p>
+                             <p>Caret: <% show (model ^. caret) %></p>
+                             <p>mousePos: <% show (model ^. mousePos) %></p>
+                             <p>editorPos: <% let mpos = model ^. editorPos in
+                                              case mpos of
+                                                 Nothing -> "(,)"
+                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+                             <p><% let mepos = model ^. editorPos in
+                                   case mepos of
+                                     Nothing -> "(,)"
+                                     (Just epos) ->
+                                       case model ^. mousePos of
+                                         Nothing -> "(,)"
+                                         (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
+                             <p>targetPos: <% let mpos = model ^. targetPos in
+                                              case mpos of
+                                                Nothing -> "(,)"
+                                                (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
+                                <% case model ^. selectionData of
+                                     Nothing -> <p>No Selection</p>
+                                     (Just selectionData) ->
+                                       <div>
+                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
+                                        <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
+                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                                       </div>
+                                %>
+                             <p>Current Font <% show (model ^. currentFont) %></p>
+                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+
+
+                      </div>
+                 else <span></span> %>
+            <h1>Editor</h1>
+            <div class="form-line editor-toolbar row">
+            <div class="col-md-6">
+              <div class="btn-group" data-toggle="buttons">
+               <label class="btn btn-default" [ EL Click boldChange ] >
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
+               <label class="btn btn-default" [ EL Click italicChange ] >
+                <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
+               <label class="btn btn-default" [ EL Click (itemize sendWS) ] >
+                <input type="checkbox" autocomplete="off" />•</label>
+              </div>
+             </div>
+            </div>
+            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [ EL KeyPress (keyPressed sendWS)
+          , EL KeyDown  (keyDowned sendWS)
+          , EL Click    (clickEditor sendWS)
+          , EL Copy     editorCopy
+          ] >
+            <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
+               <% renderLayout (model ^. layout) %>
+            </div>
+
+           </div>
+          |])
+{-
+view' :: Model -> (Html Action, [Canvas])
+view' model =
+  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (preventDefault e) >> pure (KeyDowned (keyCode e)))
+      keyPressEvent    = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
+      clickEvent       = Event Click    (\e -> pure (MouseClick e))
+      boldChange       = Event Click    (\e -> do preventDefault e ; pure (BoldChange e))
+      italicChange     = Event Click    (\e -> do preventDefault e ; pure (ItalicChange e))
+      copyEvent        = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
+      pasteEvent       = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
+      addImage         = Event Click    (\e -> pure AddImage)
+      increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
+      decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
+      setFontSize n    = Event Click    (\e -> pure (SetFontSize n))
+      incUserId        = Event Click    (\e -> pure IncUserId)
+      itemize          = Event Click    (\e -> do preventDefault e ; pure (Itemize e))
+  in
+         ([hsx|
+           <div>
+--            <p><% show ( (model ^. layout)) %></p>
+
+--            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
+--            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
+--            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
+--            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
+             <% if True
+                 then <div style="position: absolute; left: 800px; width: 800px;">
+                             <h1>Debug</h1>
+                             <p>userId: <% show (model ^. userId) %></p>
+                             <p>debugMsg: <% show (model ^. debugMsg) %></p>
+                             <p>Document: <% show (model ^. document) %></p>
+--                             <p>Patches:  <% show (model  ^. patches) %></p>
+                             <p>Index: <% show (model ^. index) %></p>
+                             <p>Caret: <% show (model ^. caret) %></p>
+                             <p>mousePos: <% show (model ^. mousePos) %></p>
+                             <p>editorPos: <% let mpos = model ^. editorPos in
+                                              case mpos of
+                                                 Nothing -> "(,)"
+                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+                             <p><% let mepos = model ^. editorPos in
+                                   case mepos of
+                                     Nothing -> "(,)"
+                                     (Just epos) ->
+                                       case model ^. mousePos of
+                                         Nothing -> "(,)"
+                                         (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
+                             <p>targetPos: <% let mpos = model ^. targetPos in
+                                              case mpos of
+                                                Nothing -> "(,)"
+                                                (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
+                                <% case model ^. selectionData of
+                                     Nothing -> <p>No Selection</p>
+                                     (Just selectionData) ->
+                                       <div>
+                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
+                                        <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
+                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                                       </div>
+                                %>
+                             <p>Current Font <% show (model ^. currentFont) %></p>
+                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+
+
+                      </div>
+                 else <span></span> %>
+
+            <h1>Editor</h1>
+            <div class="form-line editor-toolbar row">
+            {-
+             <div class="col-md-2">
+--              <button type="button" class="btn btn-default" [addImage]>Add Image</button>
+--              <button type="button" class="btn btn-default" [increaseFontSize]>+</button>
+--              <button type="button" class="btn btn-default" [decreaseFontSize]>-</button>
+             </div>
 -}
+{-
+             <div class="col-md-2">
+              <div class="input-group">
+               <div class="input-group-btn">
+                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span class="caret"></span></button>
+                <ul class="dropdown-menu">
+                 <li><a href="#" [setFontSize 10]>10</a></li>
+                 <li><a href="#" [setFontSize 12]>12</a></li>
+                 <li><a href="#" [setFontSize 14]>14</a></li>
+                 <li><a href="#" [setFontSize 16]>16</a></li>
+                 <li><a href="#" [setFontSize 18]>18</a></li>
+                </ul>
+               </div>
+               <input type="text" class="form-control col-xs-1" aria-label="..." value=(Text.pack $ show $ model ^. currentFont ^. fontSize) />
+              </div>
+            </div>
+              -}
+            <div class="col-md-6">
+--            <button [toggleBold]>Toggle Bold</button>
+              <div class="btn-group" data-toggle="buttons">
+               <label class="btn btn-default" [boldChange]>
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
+               <label class="btn btn-default" [italicChange]>
+                <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
+               <label class="btn btn-default" [itemize]>
+                <input type="checkbox" autocomplete="off" />•</label>
+
+--               <button type="button" class="btn btn-default" [itemize]>•</button>
+              </div>
+--              <button [incUserId]>UserId+</button>
+             </div>
+            </div>
+            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
+               <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
+               <% renderLayout (model ^. layout) %>
+            </div>
+           </div>
+          |], [])
+{-
+editorMUV :: MUV IO Model Action [WebSocketReq]
+editorMUV =
+  MUV { model  = Model { _document      = Document { _patches = mempty
+                                                   , _inflightPatch = Patch.fromList []
+                                                   , _forkedAt = 0
+                                                   , _pendingEdit = []
+                                                   }
+                       , _itemizing     = False
+                       , _connectionId  = Nothing
+                       , _editState     = Inserting
+                       , _index         = 0
+                       , _caret         = 0
+                       , _fontMetrics   = Map.empty
+                       , _currentFont   = defaultFont
+                       , _debugMsg      = Nothing
+                       , _mousePos      = Nothing
+                       , _editorPos     = Nothing
+                       , _targetPos     = Nothing
+                       , _layout        = Box 0 0 False []
+                       , _maxWidth      = 300
+                       , _selectionData = Nothing
+                       , _userId        = UserId 0
+                       , _lastActivity  = 0
+                       }
+--      , browserIO = browserIO'
+      , update = update'
+      , view   = view'
+      }
+
+decodeRes :: MessageEvent -> Maybe Action
+decodeRes messageEvent =
+  case MessageEvent.getData messageEvent of
+    (StringData str) ->
+      case decode (C.pack (JS.unpack str)) of
+        Nothing      -> Nothing
+        (Just wsres) -> Just (WSRes wsres)
+-}
+-}
+
+chili app initAction model url handleWS =
+  do (Just doc)   <- currentDocument
+     (Just murv) <- getElementById doc "murv"
+--     (Just body)  <- item nodes 0
+     loop doc (toJSNode murv) model initAction url handleWS app
+--     initRemoteWS url (handleWS updateModel)
+--     updateModel initAction
+
+
+initModel = Model { _document      = Document { _patches = mempty
+                                                   , _inflightPatch = Patch.fromList []
+                                                   , _forkedAt = 0
+                                                   , _pendingEdit = []
+                                                   }
+                       , _itemizing     = False
+                       , _connectionId  = Nothing
+                       , _editState     = Inserting
+                       , _index         = 0
+                       , _caret         = 0
+                       , _fontMetrics   = Map.empty
+                       , _currentFont   = defaultFont
+                       , _debugMsg      = Nothing
+                       , _mousePos      = Nothing
+                       , _editorPos     = Nothing
+                       , _targetPos     = Nothing
+                       , _layout        = Box 0 0 False []
+                       , _maxWidth      = 300
+                       , _selectionData = Nothing
+                       , _userId        = UserId 0
+                       , _lastActivity  = 0
+                       }
+
+initAction :: (WebSocketReq -> IO ()) -> Model -> IO Model
+initAction sendWS model =
+  do let rcs = nub $ richTextToRichChars bullet
+     newMetrics <- calcMetrics (model ^. fontMetrics) rcs
+     sendWS (WebSocketReq ReqInit)
+     pure (model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
+
+resInit conn initPatches model =
+  do let toRCs :: Atom -> [RichChar]
+         toRCs (Img {})      = []
+         toRCs (LineBreak)   = []
+         toRCs Item          = richTextToRichChars bullet
+         toRCs (RC rc) = [rc]
+         toRCs (RT rt) = richTextToRichChars rt
+         toRCs atom = error $ "resInit: unhandled Atom " ++ show atom
+         toRCs' :: Edit Atom -> [RichChar]
+         toRCs' (Insert _ a) = toRCs a
+         toRCs' (Delete _ _) = []
+         toRCs' (Replace _ _ a) = toRCs a
+     newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList initPatches))
+     pure (updateLayout $ model & connectionId .~ Just conn
+                                & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
+                                & (document . patches) .~ initPatches
+                                & (document . inflightPatch) .~ (Patch.fromList [])
+                                & (document . forkedAt) .~ (Seq.length initPatches - 1)
+                                & (document . pendingEdit) .~ [])
+
+resAppendPatch connId (patchId, newPatch) model
+  | model ^. connectionId == (Just connId) =
+      do putStrLn "resAppendPatch: Got own patch back"
+         let model' = updateLayout $
+               model & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                     & (document . inflightPatch) .~ (Patch.fromList [])
+                     & (document . forkedAt) .~ patchId
+         pure model' -- got our own patch back
+
+  | otherwise              = -- FIXME: probably need to call transform on the patch in progress
+      do let toRCs :: Atom -> [RichChar]
+             toRCs (Img {})      = []
+             toRCs (LineBreak)   = []
+             toRCs (RC rc) = [rc]
+             toRCs (RT rt) = richTextToRichChars rt
+             toRCs' :: Edit Atom -> [RichChar]
+             toRCs' (Insert _ a) = toRCs a
+             toRCs' (Delete _ _) = []
+             toRCs' (Replace _ _ a) = toRCs a
+         putStrLn $ "resAppendPatch: Got someone elses patch"
+         newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList newPatch))
+         let model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
+                                          & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                                          & (document . forkedAt) .~ patchId
+                                    )
+             newCaret = if maxEditPos newPatch < (model ^. caret)
+                               then (model ^. caret) + patchDelta (newPatch)
+                               else (model ^. caret)
+         pure (model' & caret .~ newCaret)
+
+{-
+  | model ^. connectionId == (Just connId) = pure Map.empty
+  | otherwise              = let toRCs :: Atom -> [RichChar]
+                                 toRCs (Img {})      = []
+                                 toRCs (LineBreak)   = []
+                                 toRCs (RC rc) = [rc]
+                                 toRCs (RT rt) = richTextToRichChars rt
+                                 toRCs' :: Edit Atom -> [RichChar]
+                                 toRCs' (Insert _ a) = toRCs a
+                                 toRCs' (Delete _ _) = []
+                                 toRCs' (Replace _ _ a) = toRCs a
+                             in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList patch))
+-}
+{-
+incomingWS :: (MessageEvent -> Maybe action) -> TQueue action -> MessageEvent -> IO ()
+incomingWS decodeAction queue messageEvent =
+  do logMessage messageEvent
+     case decodeAction messageEvent of
+       Nothing -> consoleLog "Failed to decode messageEvent"
+       (Just action) -> atomically $ writeTQueue queue action
+-}
+
+foreign import javascript unsafe  "console[\"log\"]($1)" consoleLog :: JS.JSString -> IO ()
+
+foreign import javascript unsafe "function(buf){ if (!buf) { throw \"checkArrayBuffer: !buf\"; }; if (!(buf instanceof ArrayBuffer)) { throw \"checkArrayBuffer: buf is not an ArrayBuffer\"; }}($1)" checkArrayBuffer :: MutableArrayBuffer -> IO ()
+
+foreign import javascript unsafe
+   "new ArrayBuffer($1)" js_create :: Int -> IO MutableArrayBuffer
+
+create :: Int -> IO MutableArrayBuffer
+create n = js_create n
+{-# INLINE create #-}
+
+logMessage :: MessageEvent -> IO ()
+logMessage messageEvent =
+  case MessageEvent.getData messageEvent of
+    (StringData str)    -> consoleLog str
+    (ArrayBufferData r) -> do consoleLog "Got ArrayBufferData"
+                              marray <- ArrayBuffer.thaw r
+                              let jsval = (pToJSVal marray)
+                                  buf   = createFromArrayBuffer r :: Buffer.Buffer
+                              ab <- create 10
+                              checkArrayBuffer marray
+                              consoleLog ("checkArrayBuffer passed.")
+                              consoleLog (JS.pack (show (isUndefined jsval)))
+                              consoleLog (JS.pack (show (isNull jsval)))
+                              consoleLog (JS.pack (show (toByteString 0 Nothing buf)))
+                              -- -- (show ((decodeStrict (toByteString 0 Nothing (createFromArrayBuffer r))) :: Maybe WebSocketRes)))
+
+handleMessage :: MessageEvent -> Model -> IO Model
+handleMessage messageEvent model =
+  do logMessage messageEvent
+     case decodeRes messageEvent of
+       Nothing ->
+         do putStrLn "handleMessage: unable to decode response"
+            pure model
+       (Just res) ->
+         case res of
+           (ResAppendPatch connId (i, path)) -> resAppendPatch connId (i, path) model
+           (ResInit connId patches) -> resInit connId patches model
+
+decodeRes :: MessageEvent -> (Maybe WebSocketRes)
+decodeRes messageEvent =
+  case MessageEvent.getData messageEvent of
+    (StringData str) -> decodeStrict (CS.pack (JS.unpack str))
+{-    
+        Nothing      -> Nothing
+        (Just wsres) -> Ju
+          case wsres of
+            (ResAppendPatch connId (i, path)) ->
+              resAppendPatch connId (i, path)
+            _ -> pure ()
+-}
+{-
+  = ResAppendPatch ConnectionId (Int, Patch Atom)
+--  | ResUpdateCurrent ConnectionId [Edit Atom]
+  | ResInit ConnectionId (Seq (Patch Atom))
+-}
+
+main :: IO ()
+main =
+  chili app initAction initModel "ws://localhost:8000/editor/websockets" handleMessage
+--  muvWS editorMUV id "ws://localhost:8000/editor/websockets" decodeRes (Just Init)
+
+{- JAS
 update' :: Action
         -> Model
         -> IO (Model, Maybe [WebSocketReq])
-update' action model'' = do  
+update' action model'' = do
   now <- getPOSIXTime
   (Just doc)        <- currentDocument
   (Just editorElem) <- getElementById doc "editor"
+  focus editorElem
   rect <- getBoundingClientRect editorElem
   let activity =
         case action of
@@ -596,6 +1157,7 @@ update' action model'' = do
                             | otherwise              -> let toRCs :: Atom -> [RichChar]
                                                             toRCs (Img {})      = []
                                                             toRCs (LineBreak)   = []
+                                                            toRCs Item          = richTextToRichChars bullet
                                                             toRCs (RC rc) = [rc]
                                                             toRCs (RT rt) = richTextToRichChars rt
                                                             toRCs' :: Edit Atom -> [RichChar]
@@ -607,6 +1169,7 @@ update' action model'' = do
                             let toRCs :: Atom -> [RichChar]
                                 toRCs (Img {})      = []
                                 toRCs (LineBreak)   = []
+                                toRCs Item          = richTextToRichChars bullet
                                 toRCs (RC rc) = [rc]
                                 toRCs (RT rt) = richTextToRichChars rt
                                 toRCs' :: Edit Atom -> [RichChar]
@@ -617,7 +1180,9 @@ update' action model'' = do
 
                       _ -> pure Map.empty
   case action of
-      Init             -> pure (model, Just [WebSocketReq ReqInit])
+      Init             -> do let rcs = nub $ richTextToRichChars bullet
+                             newMetrics <- calcMetrics (model ^. fontMetrics) rcs
+                             pure (model & fontMetrics  %~ (\old -> old `mappend` newMetrics), Just [WebSocketReq ReqInit])
 
       ActivityTimeout  -> if forceActivity
                              then do let (model', req) = handleAction (MoveCaret (model ^. caret)) model
@@ -625,6 +1190,9 @@ update' action model'' = do
                              else pure (model & debugMsg .~ (Just $ Text.pack $ show $ now), Nothing)
 
       AddImage         ->  pure $ handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model
+      Itemize e        -> case model ^. itemizing of
+                           False -> pure $ handleAction (InsertAtom Item) (model & itemizing .~ True)
+                           True  -> pure $ (model & itemizing .~ False, Nothing)
       IncreaseFontSize ->  pure (model & (currentFont . fontSize) %~ succ, Nothing)
       DecreaseFontSize ->  pure (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
       (SetFontSize s)  -> pure (model & (currentFont . fontSize) .~ s, Nothing)
@@ -632,7 +1200,6 @@ update' action model'' = do
       BoldChange e     -> pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange", Nothing)
       ItalicChange e   -> pure (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
       IncUserId        -> pure (model & userId %~ succ, Nothing)
-
 
 {-
       CopyA ceo      ->  -- cd <- clipboardData ceo
@@ -654,7 +1221,9 @@ update' action model'' = do
       -- used for handling special cases like backspace, space
       KeyDowned c -- handle \r and \n ?
         | c == 8    -> pure $ handleAction DeleteAtom model
-        | c == 13   -> pure $ handleAction (InsertAtom LineBreak) model
+        | c == 13   -> case model ^. itemizing of
+                         False -> pure $ handleAction (InsertAtom LineBreak) model
+                         True  -> pure $ handleAction (InsertAtom Item) model
         | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
                            model' = case Map.lookup rc newFontMetrics of
                              Nothing -> model
@@ -707,282 +1276,4 @@ update' action model'' = do
                                   & (document . inflightPatch) .~ (Patch.fromList [])
                                   & (document . forkedAt) .~ (Seq.length initPatches - 1)
                                   & (document . pendingEdit) .~ [], Nothing)
-
--- | calculate tho CSS value for a 'Font'
-fontToStyle :: Font -> Text
-fontToStyle font =
-  "font-size: " <> Text.pack (show $ font ^. fontSize) <>
-  "px; height: " <> Text.pack (show $ font ^. fontSize) <>
-  "px; font-weight: " <> (fontWeightText $ font ^. fontWeight) <>
-  "; font-style: " <> (case (font ^. fontStyle) of
-                          Normal  -> "normal;"
-                          Italic  -> "italic;"
-                          Oblique -> "oblique;")
-
--- | convert an 'AtomBox' to HTML
-renderAtomBox :: AtomBox
-              -> [HTML Action]
--- renderTextBox box = CDATA True (box ^. boxContent)
-renderAtomBox box =
-  case box ^. boxContent of
-    (RT (RichText txts)) -> map renderText txts
-    (Img img)            -> [[hsx| <img src=(img ^. imageUrl) /> |]]
-    LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]]
-  where
-    renderText :: (Font, Text) -> HTML Action
-    renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
-    nbsp = Text.replace " " (Text.singleton '\160')
-
--- | convert a horizontal list of 'AtomBom' to HTML
-renderAtomBoxes' :: HBox [AtomBox] -> HTML Action
-renderAtomBoxes' box =
-    [hsx| <div class=("line"::Text)><% concatMap renderAtomBox (box ^. boxContent)  %></div> |]
---  [hsx| <div class=(if line ^. lineHighlight then ("line highlight" :: Text) else "line")><% map renderTextBox (line ^. lineBoxes)  %></div> |]
-
--- | convert a vertical list of horizontal lists of 'AtomBom' to HTML
-renderAtomBoxes :: VBox [HBox [AtomBox]] -> HTML Action
-renderAtomBoxes lines =
-  [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
-
--- render a layout (vertical list of horizontal lists of AtomBoxes) to HTML
-renderLayout :: VBox [HBox [AtomBox]]
-          -> HTML Action
-renderLayout lines =
-  [hsx|
-    <div data-path="root">
-     <% renderAtomBoxes lines %>
---        <% textToHTML fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
---      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
---      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
-    </div>
-  |]
-{-
-  where
-    rlines :: String -> [String]
-    rlines l =
-      let (b, a) = break (\c -> c == '\n' || c == '\r') l
-      in case a of
-       [] -> [b]
-       [c] -> b : [""]
-       (_:cs) -> b : rlines cs
 -}
--- | calculate the x offset from the left side of an AtomBox to the
--- right side of the element at position specified by the index into
--- the AtomBox.
---
--- Some AtomBoxes only contain a single item (such as an
--- image). Others contain multiple items -- such as text.
-indexToPosAtom :: Int
-               -> FontMetrics
-               -> AtomBox
-               -> Maybe Double
-indexToPosAtom index fm box =
-  case box ^. boxContent of
-    (RT rt)
-      | richTextLength rt < index -> Nothing
-      | otherwise ->
-        Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
-    (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
-    LineBreak -> Just 0 -- FIXME: do we have to account for the fact that we should be at a newline now?
-  where
-    sumWidth c acc =
-      case Map.lookup c fm of
-        Just (w, _) -> acc + w
-        Nothing -> acc
-
--- | given an index, calculate its (left, top, height) coordinates in the editor
---
-indexToPos :: Int
-           -> Model
-           -> Maybe (Double, Double, Double)
-indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: maybe shouldn't hardcode to 16
-  where
-    -- go over the lines
-    go [] _ _  = Nothing
-    go (hbox:hboxes) i curPos =
-      -- walk over thecurrent line
-      case go' (hbox ^. boxContent) (hbox ^. boxHeight) i curPos of
-       -- if the position is in current line, we are done
-       (Right curPos') -> curPos'
-       -- otherwise add the height of that line and start
-       -- looking in the next line
-       (Left (i', (x,y,height))) ->
-         go hboxes i' (0, y + hbox ^. boxHeight, height)
-
-    -- go over the atoms in a line
---     go' :: [AtomBox] -> Int -> Double -> Either (Int, Double) (Maybe Double)
-    go' [] _ i curPos = Left (i, curPos)
-    go' _ _ 0 curPos = Right (Just curPos)
-    go' (box:boxes) lineHeight i (x,y,height) =
-      -- if the index is greater than the length of the next atom
-      if i > atomLength (box ^. boxContent)
-         -- subtract length of next atom, add width, update height, check next atom
-         then go' boxes lineHeight (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y, box ^. boxHeight)
-         -- if we found the atom we are looking for, look for x position within the atom
-         else case indexToPosAtom i (model ^. fontMetrics) box of
-               Nothing   -> Right Nothing
-               (Just x') ->
-                 let boxForHeight = box
-                     {-
-                       case boxes of
-                         (box':_) -> box'
-                         _        -> box
--}
-                 in Right (Just (x + x', y + (lineHeight - (boxForHeight ^. boxHeight)), boxForHeight ^. boxHeight))
-
-caretPos :: Model -> Maybe (Double, Double, Double) -> [KV Text Text]
-caretPos model Nothing = []
-caretPos model (Just (x, y, height)) =
-  case model ^. editorPos of
-   Nothing -> []
-   (Just ep) -> ["style" := ("top: "        <> (Text.pack $ show y)      <>
-                             "px; left: "   <> (Text.pack $ show x)      <>
-                             "px; height: " <> (Text.pack $ show height) <>
-                             "px;"
-                             )
-                ]
-
-view' :: Model -> (HTML Action, [Canvas])
-view' model =
-  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (preventDefault e) >> pure (KeyDowned (keyCode e)))
-      keyPressEvent    = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
-      clickEvent       = Event Click    (\e -> pure (MouseClick e))
-      boldChange       = Event Click    (\e -> do preventDefault e ; pure (BoldChange e))
-      italicChange     = Event Click    (\e -> do preventDefault e ; pure (ItalicChange e))
-      copyEvent        = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
-      pasteEvent       = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
-      addImage         = Event Click    (\e -> pure AddImage)
-      increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
-      decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
-      setFontSize n    = Event Click   (\e -> pure (SetFontSize n))
-      incUserId        = Event Click    (\e -> pure IncUserId)
-  in
-         ([hsx|
-           <div>
---            <p><% show ( (model ^. layout)) %></p>
-
---            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
-             <% if True
-                 then <div style="position: absolute; left: 1000px; width: 800px;">
-                             <h1>Debug</h1>
-                             <p>userId: <% show (model ^. userId) %></p>
-                             <p>debugMsg: <% show (model ^. debugMsg) %></p>
---                             <p>Document: <% show (model ^. document) %></p>
---                             <p>Patches:  <% show (model  ^. patches) %></p>
-                             <p>Index: <% show (model ^. index) %></p>
-                             <p>Caret: <% show (model ^. caret) %></p>
-                             <p>mousePos: <% show (model ^. mousePos) %></p>
-                             <p>editorPos: <% let mpos = model ^. editorPos in
-                                              case mpos of
-                                                 Nothing -> "(,)"
-                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p><% let mepos = model ^. editorPos in
-                                   case mepos of
-                                     Nothing -> "(,)"
-                                     (Just epos) ->
-                                       case model ^. mousePos of
-                                         Nothing -> "(,)"
-                                         (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
-                             <p>targetPos: <% let mpos = model ^. targetPos in
-                                              case mpos of
-                                                Nothing -> "(,)"
-                                                (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-                                <% case model ^. selectionData of
-                                     Nothing -> <p>No Selection</p>
-                                     (Just selectionData) ->
-                                       <div>
-                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
-                                        <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
-                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
-                                       </div>
-                                %>
-                             <p>Current Font <% show (model ^. currentFont) %></p>
-                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
-
-
-                      </div>
-                 else <span></span> %>
-
-            <h1>Editor</h1>
-            <div class="form-line editor-toolbar row">
-             <div class="col-md-2">
-              <button type="button" class="btn btn-default" [addImage]>Add Image</button>
---              <button type="button" class="btn btn-default" [increaseFontSize]>+</button>
---              <button type="button" class="btn btn-default" [decreaseFontSize]>-</button>
-             </div>
-             <div class="col-md-2">
-              <div class="input-group">
-               <div class="input-group-btn">
-                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span class="caret"></span></button>
-                <ul class="dropdown-menu">
-                 <li><a href="#" [setFontSize 10]>10</a></li>
-                 <li><a href="#" [setFontSize 12]>12</a></li>
-                 <li><a href="#" [setFontSize 14]>14</a></li>
-                 <li><a href="#" [setFontSize 16]>16</a></li>
-                 <li><a href="#" [setFontSize 18]>18</a></li>
-                </ul>
-               </div>
-               <input type="text" class="form-control col-xs-1" aria-label="..." value=(Text.pack $ show $ model ^. currentFont ^. fontSize) />
-              </div>
-            </div>
-            <div class="col-md-6">
---            <button [toggleBold]>Toggle Bold</button>
-              <div class="btn-group" data-toggle="buttons">
-               <label class="btn btn-default" [boldChange]>
-                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
-               <label class="btn btn-default" [italicChange]>
-                <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
-              </div>
---              <button [incUserId]>UserId+</button>
-             </div>
-            </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
-               <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-               <% renderLayout (model ^. layout) %>
-            </div>
-           </div>
-          |], [])
-
-editorMUV :: MUV IO Model Action [WebSocketReq]
-editorMUV =
-  MUV { model  = Model { _document      = Document { _patches = mempty
-                                                   , _inflightPatch = Patch.fromList []
-                                                   , _forkedAt = 0
-                                                   , _pendingEdit = []
-                                                   }
-                       , _connectionId  = Nothing
-                       , _editState     = Inserting
-                       , _index         = 0
-                       , _caret         = 0
-                       , _fontMetrics   = Map.empty
-                       , _currentFont   = defaultFont
-                       , _debugMsg      = Nothing
-                       , _mousePos      = Nothing
-                       , _editorPos     = Nothing
-                       , _targetPos     = Nothing
-                       , _layout        = Box 0 0 False []
-                       , _maxWidth      = 300
-                       , _selectionData = Nothing
-                       , _userId        = UserId 0
-                       , _lastActivity  = 0
-                       }
---      , browserIO = browserIO'
-      , update = update'
-      , view   = view'
-      }
-
-decodeRes :: MessageEvent -> Maybe Action
-decodeRes messageEvent =
-  case MessageEvent.getData messageEvent of
-    (StringData str) ->
-      case decode (C.pack (JS.unpack str)) of
-        Nothing      -> Nothing
-        (Just wsres) -> Just (WSRes wsres)
-
-main :: IO ()
-main =
-  muvWS editorMUV id "ws://localhost:8000/editor/websockets" decodeRes (Just Init)

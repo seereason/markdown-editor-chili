@@ -162,6 +162,7 @@ data Atom
   | Img Image
   | Conflict Atom Atom
   | LineBreak
+  | Item
     deriving (Eq, Show)
 deriveJSON defaultOptions ''Atom
 
@@ -181,6 +182,7 @@ atomLength (RC {})  = 1
 atomLength (RT (RichText txts)) = sum (map (Text.length . snd) txts)
 atomLength (Img {})       = 1
 atomLength LineBreak = 1 -- FIXME: or is it zero?
+atomLength Item = 1 -- or is it zero?
 atomLength (Conflict atom1 atom2) = atomLength atom1 + atomLength atom2
 
 type AtomBox  = Box Singleton Atom

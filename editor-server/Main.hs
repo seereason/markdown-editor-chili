@@ -74,13 +74,14 @@ editorApp tvServerState pendingConnection =
 --                                                             })
      (forever $ do bs' <- receiveData conn
                    let bs = C.takeWhile (/= '\0') bs'
---                  liftIO $ print bs
-                   let mReqs = (decode bs) :: Maybe [WebSocketReq]
---                  liftIO $ print mReqs
-                   case mReqs of
+                   liftIO $ putStrLn (C.unpack bs)
+                   let mReq = (decode bs) :: Maybe (WebSocketReq)
+                   liftIO $ print mReq
+                   case mReq of
                      Nothing -> pure ()
-                     (Just reqs) ->
-                          mapM_ (handleReq tvServerState conn i) reqs)
+                     (Just req) ->
+                       handleReq tvServerState conn i req)
+--                          mapM_ (handleReq tvServerState conn i) reqs)
        `finally` (do putStrLn $ "Removing connection: " ++ show i
                      atomically $ modifyTVar' tvServerState (\ss -> ss { connections = filter (\(n,_) -> n /= i) (connections ss) }))
      --             sendTextData conn t
