@@ -938,28 +938,29 @@ chili app initAction model url handleWS =
 --     updateModel initAction
 
 
-initModel = Model { _document      = Document { _patches = mempty
-                                                   , _inflightPatch = Patch.fromList []
-                                                   , _forkedAt = 0
-                                                   , _pendingEdit = []
-                                                   }
-                       , _itemizing     = False
-                       , _connectionId  = Nothing
-                       , _editState     = Inserting
-                       , _index         = 0
-                       , _caret         = 0
-                       , _fontMetrics   = Map.empty
-                       , _currentFont   = defaultFont
-                       , _debugMsg      = Nothing
-                       , _mousePos      = Nothing
-                       , _editorPos     = Nothing
-                       , _targetPos     = Nothing
-                       , _layout        = Box 0 0 False []
-                       , _maxWidth      = 300
-                       , _selectionData = Nothing
-                       , _userId        = UserId 0
-                       , _lastActivity  = 0
-                       }
+initModel = Model
+  { _document      = Document { _patches = mempty
+                              , _inflightPatch = Patch.fromList []
+                              , _forkedAt = 0
+                              , _pendingEdit = []
+                              }
+  , _itemizing     = False
+  , _connectionId  = Nothing
+  , _editState     = Inserting
+  , _index         = 0
+  , _caret         = 0
+  , _fontMetrics   = Map.empty
+  , _currentFont   = defaultFont
+  , _debugMsg      = Nothing
+  , _mousePos      = Nothing
+  , _editorPos     = Nothing
+  , _targetPos     = Nothing
+  , _layout        = Box 0 0 False []
+  , _maxWidth      = 300
+  , _selectionData = Nothing
+  , _userId        = UserId 0
+  , _lastActivity  = 0
+  }
 
 initAction :: (WebSocketReq -> IO ()) -> Model -> IO Model
 initAction sendWS model =
@@ -967,6 +968,10 @@ initAction sendWS model =
      newMetrics <- calcMetrics (model ^. fontMetrics) rcs
      sendWS (WebSocketReq ReqInit)
      pure (model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
+
+     -- FIXME: perhaps this should be attached to the <body> tag?
+--     cb <- asyncCallback activityTimeout
+--     js_setTimeout cb 1000
 
 resInit conn initPatches model =
   do let toRCs :: Atom -> [RichChar]

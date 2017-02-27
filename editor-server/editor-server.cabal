@@ -13,7 +13,7 @@ executable editor-server
   main-is:             Main.hs
   build-depends:       aeson,
                        acid-state,
-                       base >=4.8 && <4.9,
+                       base >=4.8 && <4.10,
                        bytestring,
                        containers,
                        editor-common,
