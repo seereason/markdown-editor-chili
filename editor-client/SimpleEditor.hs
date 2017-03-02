@@ -102,30 +102,35 @@ data SelectionData = SelectionData
   }
 makeLenses ''SelectionData
 
-data Document = Document
-  { _patches     :: Seq (Patch Atom) -- ^ expected to always be free of conflicts.
+data LocalDocument = LocalDocument
+  { _document     :: Document -- Seq (Patch Atom) -- ^ expected to always be free of conflicts.
 --  , _currentEdit :: [Edit Atom]
-  , _inflightPatch :: Patch Atom
+  , _inflightPatch :: Maybe (Patch Atom)
   , _forkedAt      :: Int
   , _pendingEdit   :: [Edit Atom]
   }
   deriving Show
-makeLenses ''Document
+makeLenses ''LocalDocument
 
-flattenDocument :: Document -> Vector Atom
-flattenDocument doc =
-  let committedDoc = foldl' (\doc patch -> apply patch doc) mempty (doc ^. patches) -- conflict-free patches
-      pendingPatch = Patch.fromList (doc ^. pendingEdit)
-  in if applicable (doc ^. inflightPatch) committedDoc
-     then let doc' = apply (doc ^. inflightPatch) committedDoc
-          in if applicable pendingPatch doc'
-             then apply pendingPatch doc'
-             else doc' -- FIXME
-     else committedDoc -- FIXME
+flattenDocument :: LocalDocument -> Vector Atom
+flattenDocument localDoc =
+  let committedDoc = foldl' (\doc patch -> apply patch doc) mempty (localDoc ^. document ^. patches) -- conflict-free patches
+--      inflight' = fromMaybe (Patch.fromList []) (localDoc ^. inflightPatch)
+      pendingPatch = Patch.fromList (localDoc ^. pendingEdit)
+  in let doc' =
+           case localDoc ^. inflightPatch of
+             (Just ifp) ->
+               if applicable ifp committedDoc
+               then apply ifp committedDoc
+               else committedDoc -- FIXME
+             Nothing -> committedDoc
+     in if applicable pendingPatch doc'
+        then apply pendingPatch doc'
+        else doc' -- FIXME
 
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
-  { _document      :: Document -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
+  { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
   , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
@@ -257,7 +262,7 @@ atomsToLines fm maxWidth atoms =
 calcLayout :: Model
            -> VBox [HBox [AtomBox]]
 calcLayout model =
-  atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (flattenDocument $ model ^. document)
+  atomsToLines (model ^. fontMetrics) (model ^. maxWidth) (flattenDocument $ model ^. localDocument)
 
 updateLayout :: Model -> Model
 updateLayout m = m { _layout = calcLayout m }
@@ -266,9 +271,9 @@ insertChar :: Atom
            -> Model
            -> (Model, Maybe [WebSocketReq])
 insertChar atom model =
-  let newEdit =  (model ^. document ^. pendingEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
+  let newEdit =  (model ^. localDocument ^. pendingEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
   in
-     (updateLayout $ model { _document = (model ^. document) & pendingEdit .~ newEdit
+     (updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
          , _caret       = succ (model ^. caret)
          }, Nothing)
 
@@ -276,11 +281,11 @@ backspaceChar :: Model -> (Model, Maybe [WebSocketReq])
 backspaceChar model
  | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
   let index'  = pred (model ^. index)
-      c       = (flattenDocument $ model ^. document) ! index'
-      newEdit = (model ^. document ^. pendingEdit) ++ [Delete index' c]
+      c       = (flattenDocument $ model ^. localDocument) ! index'
+      newEdit = (model ^. localDocument ^. pendingEdit) ++ [Delete index' c]
   in
      (updateLayout $
-       model {  _document = (model ^. document) & pendingEdit .~ newEdit
+       model {  _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
              , _index       = pred (model ^. index)
              , _caret       = pred (model ^. caret)
              }, Nothing)
@@ -292,45 +297,45 @@ handleAction sendWS ea model
       case ea of
        InsertAtom c -> pure $ insertChar c model
        DeleteAtom ->
-         let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
-             model'     = model { _document    = (model ^. document) & inflightPatch .~ newPatch
+         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
+             model'     = model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
                                                                      & pendingEdit   .~ []
                                 , _editState   = Deleting
                                 , _index       = model ^. caret
                                 }
          in do (model'', mwsq) <- handleAction sendWS DeleteAtom model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
                pure (model'', Nothing)
        MoveCaret {} ->
-         let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
-             model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
+         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
+             model'     =  model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
                                                                       & pendingEdit   .~ []
                                   , _editState   = MovingCaret
                                   }
          in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
                pure (model'', Nothing)
 
   | model ^. editState == Deleting =
       case ea of
        DeleteAtom -> pure $ backspaceChar model
        InsertAtom _ ->
-         let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
-             model' = model & (document . inflightPatch) .~ newPatch
-                            & (document . pendingEdit) .~ []
+         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
+             model' = model & (localDocument . inflightPatch) .~ Just newPatch
+                            & (localDocument . pendingEdit) .~ []
                             & editState .~ Inserting
          in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
                pure (model'', Nothing)
 
        MoveCaret {} ->
-         let newPatch   = Patch.fromList (model ^. document ^. pendingEdit)
-             model'     =  model { _document    = (model ^. document) & inflightPatch .~ newPatch
+         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
+             model'     =  model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
                                                                       & pendingEdit   .~ []
                                   , _editState   = MovingCaret
                                   }
          in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. document ^. forkedAt) newPatch))
+               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
                pure (model'', Nothing)
 
   | model ^. editState == MovingCaret =
@@ -451,8 +456,8 @@ foreign import javascript unsafe "window[\"setTimeout\"]($1, $2)" js_setTimeout 
 -- | return a Map of any new metrics
 calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
 calcMetrics fm rcs =
-  do (Just document)    <- currentDocument
-     (Just measureElem) <- getElementById document "measureElement"
+  do (Just doc)    <- currentDocument
+     (Just measureElem) <- getElementById doc "measureElement"
      metrics <- mapM (calcMetric measureElem) (nub rcs)
      pure (Map.fromList (catMaybes metrics))
   where
@@ -610,8 +615,8 @@ updateEditorPos model =
      pure $ model { _editorPos = Just rect}
 
 
-keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> Model -> IO Model
-keyPressed sendWS e model'' =
+keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> WithModel Model -> IO ()
+keyPressed sendWS e withModel = withModel $ \model'' ->
   do model <- updateEditorPos model''
      let c = chr (charCode e)
          rc = RichChar (model ^. currentFont) c
@@ -619,8 +624,8 @@ keyPressed sendWS e model'' =
      newFontMetrics <-
        case Map.lookup rc (model ^. fontMetrics) of
          Nothing ->
-           do (Just document) <- currentDocument
-              (Just measureElem) <- getElementById document "measureElement"
+           do (Just doc) <- currentDocument
+              (Just measureElem) <- getElementById doc "measureElement"
               (_, metric) <- getFontMetric measureElem rc
               pure (Map.singleton rc metric)
          Just {} -> pure Map.empty
@@ -631,9 +636,9 @@ keyPressed sendWS e model'' =
 
 keyDowned :: (WebSocketReq -> IO ())
           -> KeyboardEventObject
-          -> Model
-          -> IO Model
-keyDowned sendWS e model =
+          -> WithModel Model
+          -> IO ()
+keyDowned sendWS e withModel = withModel $ \model ->
  do putStrLn $ "KeyDowned "++ (show $ keyCode e)
     let c = (keyCode e)
     when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (putStrLn "preventDefault" >> preventDefault e)
@@ -665,8 +670,8 @@ keyDowned sendWS e model =
         | c == 40   -> pure $ (model, Nothing)                                      -- down
         | otherwise -> pure $ (model, Nothing)
 
-clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO Model
-clickEditor sendWS e model'' =
+clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
+clickEditor sendWS e withModel = withModel $ \model'' ->
   do model <- updateEditorPos model''
      let elem = target e
      targetRect <- getBoundingClientRect elem
@@ -680,25 +685,25 @@ clickEditor sendWS e model'' =
        (Just i) -> fst <$> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ fst $ (model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click."), Nothing)
 
-boldChange :: MouseEventObject -> Model -> IO Model
-boldChange e model =
+boldChange :: MouseEventObject -> WithModel Model -> IO ()
+boldChange e withModel = withModel $ \model->
   do preventDefault e
      pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
 
-italicChange :: MouseEventObject -> Model -> IO Model
-italicChange e model =
+italicChange :: MouseEventObject -> WithModel Model -> IO ()
+italicChange e withModel =  withModel $ \model->
   do preventDefault e
      pure $ fst $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
 
-itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO Model
-itemize sendWS e model =
+itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
+itemize sendWS e withModel =  withModel $ \model->
   do preventDefault e
      case model ^. itemizing of
        False -> fst <$> handleAction sendWS (InsertAtom Item) (model & itemizing .~ True)
        True  -> pure $ fst $ (model & itemizing .~ False, Nothing)
 
-editorCopy :: ClipboardEventObject -> Model -> IO Model
-editorCopy e model =
+editorCopy :: ClipboardEventObject -> WithModel Model -> IO ()
+editorCopy e withModel =  withModel $ \model->
   do preventDefault e
      dt <- clipboardData e
      setDataTransferData dt "text/plain" "boo-yeah"
@@ -706,7 +711,7 @@ editorCopy e model =
 
 app :: (WebSocketReq -> IO ()) -> Model -> Html Model
 app sendWS model =
-  let setFontSize s = EL Click (\e m -> pure $ m & (currentFont . fontSize) .~ s)
+  let setFontSize s = EL Click (\e withModel -> withModel $ \m -> pure $ m & (currentFont . fontSize) .~ s)
   in
          ([hsx|
            <div>
@@ -715,7 +720,7 @@ app sendWS model =
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
                              <p>debugMsg: <% show (model ^. debugMsg) %></p>
-                             <p>Document: <% show (model ^. document) %></p>
+                             <p>Document: <% show (model ^. localDocument) %></p>
 --                             <p>Patches:  <% show (model  ^. patches) %></p>
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
@@ -939,11 +944,11 @@ chili app initAction model url handleWS =
 
 
 initModel = Model
-  { _document      = Document { _patches = mempty
-                              , _inflightPatch = Patch.fromList []
-                              , _forkedAt = 0
-                              , _pendingEdit = []
-                              }
+  { _localDocument      = LocalDocument { _document = emptyDocument
+                                   , _inflightPatch = Nothing
+                                   , _forkedAt = 0
+                                   , _pendingEdit = []
+                                   }
   , _itemizing     = False
   , _connectionId  = Nothing
   , _editState     = Inserting
@@ -962,8 +967,8 @@ initModel = Model
   , _lastActivity  = 0
   }
 
-initAction :: (WebSocketReq -> IO ()) -> Model -> IO Model
-initAction sendWS model =
+initAction :: (WebSocketReq -> IO ()) -> WithModel Model -> IO ()
+initAction sendWS withModel = withModel $ \model ->
   do let rcs = nub $ richTextToRichChars bullet
      newMetrics <- calcMetrics (model ^. fontMetrics) rcs
      sendWS (WebSocketReq ReqInit)
@@ -973,7 +978,7 @@ initAction sendWS model =
 --     cb <- asyncCallback activityTimeout
 --     js_setTimeout cb 1000
 
-resInit conn initPatches model =
+resInit conn initDoc model =
   do let toRCs :: Atom -> [RichChar]
          toRCs (Img {})      = []
          toRCs (LineBreak)   = []
@@ -985,21 +990,21 @@ resInit conn initPatches model =
          toRCs' (Insert _ a) = toRCs a
          toRCs' (Delete _ _) = []
          toRCs' (Replace _ _ a) = toRCs a
-     newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList initPatches))
+     newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList (initDoc ^. patches)))
      pure (updateLayout $ model & connectionId .~ Just conn
                                 & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
-                                & (document . patches) .~ initPatches
-                                & (document . inflightPatch) .~ (Patch.fromList [])
-                                & (document . forkedAt) .~ (Seq.length initPatches - 1)
-                                & (document . pendingEdit) .~ [])
+                                & (localDocument . document) .~ initDoc
+                                & (localDocument . inflightPatch) .~ Nothing
+                                & (localDocument . forkedAt) .~ (Seq.length (initDoc ^. patches) - 1)
+                                & (localDocument . pendingEdit) .~ [])
 
 resAppendPatch connId (patchId, newPatch) model
   | model ^. connectionId == (Just connId) =
       do putStrLn "resAppendPatch: Got own patch back"
          let model' = updateLayout $
-               model & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                     & (document . inflightPatch) .~ (Patch.fromList [])
-                     & (document . forkedAt) .~ patchId
+               model & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                     & (localDocument . inflightPatch) .~ Nothing
+                     & (localDocument . forkedAt) .~ patchId
          pure model' -- got our own patch back
 
   | otherwise              = -- FIXME: probably need to call transform on the patch in progress
@@ -1015,8 +1020,8 @@ resAppendPatch connId (patchId, newPatch) model
          putStrLn $ "resAppendPatch: Got someone elses patch"
          newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList newPatch))
          let model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
-                                          & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                                          & (document . forkedAt) .~ patchId
+                                          & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                                          & (localDocument . forkedAt) .~ patchId
                                     )
              newCaret = if maxEditPos newPatch < (model ^. caret)
                                then (model ^. caret) + patchDelta (newPatch)
@@ -1072,8 +1077,8 @@ logMessage messageEvent =
                               consoleLog (JS.pack (show (toByteString 0 Nothing buf)))
                               -- -- (show ((decodeStrict (toByteString 0 Nothing (createFromArrayBuffer r))) :: Maybe WebSocketRes)))
 
-handleMessage :: MessageEvent -> Model -> IO Model
-handleMessage messageEvent model =
+handleMessage :: MessageEvent -> WithModel Model -> IO ()
+handleMessage messageEvent withModel = withModel $ \model ->
   do logMessage messageEvent
      case decodeRes messageEvent of
        Nothing ->
@@ -1082,7 +1087,7 @@ handleMessage messageEvent model =
        (Just res) ->
          case res of
            (ResAppendPatch connId (i, path)) -> resAppendPatch connId (i, path) model
-           (ResInit connId patches) -> resInit connId patches model
+           (ResInit connId doc) -> resInit connId doc model
 
 decodeRes :: MessageEvent -> (Maybe WebSocketRes)
 decodeRes messageEvent =

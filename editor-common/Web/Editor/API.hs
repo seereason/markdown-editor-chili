@@ -7,7 +7,7 @@
 {-# LANGUAGE TemplateHaskell            #-}
 module Web.Editor.API where
 
-import           Common (Atom, ConnectionId)
+import           Common (Atom, ConnectionId,Document(..))
 import           Data.Aeson.TH (defaultOptions, deriveJSON)
 import           Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import           Data.Sequence (Seq)
@@ -32,7 +32,7 @@ deriveJSON defaultOptions ''WebSocketReq
 data WebSocketRes
   = ResAppendPatch ConnectionId (Int, Patch Atom)
 --  | ResUpdateCurrent ConnectionId [Edit Atom]
-  | ResInit ConnectionId (Seq (Patch Atom))
+  | ResInit ConnectionId Document
     deriving Show
 deriveJSON defaultOptions ''WebSocketRes
 

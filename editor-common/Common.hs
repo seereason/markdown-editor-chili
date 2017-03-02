@@ -16,6 +16,7 @@
 {-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE StandaloneDeriving #-}
 module Common where
 
 import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set)
@@ -25,6 +26,7 @@ import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.TH (deriveJSON, defaultOptions)
 import Data.Char (chr)
+import Data.Data (Data, Typeable)
 -- import qualified Data.JSString as JS
 -- import Data.JSString.Text (textToJSString, textFromJSString)
 import Data.List (findIndex, groupBy, null, splitAt)
@@ -34,6 +36,7 @@ import Data.Maybe (fromJust, fromMaybe, maybe)
 import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import qualified Data.Patch as Patch
+import Data.Sequence          (Seq, (|>))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Vector (Vector, (!))
@@ -55,7 +58,7 @@ data FontStyle
   = Normal
   | Italic
   | Oblique
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Read, Data, Typeable)
 deriveJSON defaultOptions ''FontStyle
 
 data FontWeight
@@ -68,7 +71,7 @@ data FontWeight
   | FW700
   | FW800
   | FW900
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Read, Data, Typeable)
 deriveJSON defaultOptions ''FontWeight
 
 fontWeightText :: FontWeight -> Text
@@ -89,7 +92,7 @@ data Font = Font
  , _fontSize   :: Double
  , _fontStyle  :: FontStyle
  }
- deriving (Eq, Ord, Show)
+ deriving (Eq, Ord, Show, Read, Data, Typeable)
 makeLenses ''Font
 deriveJSON defaultOptions ''Font
 
@@ -104,7 +107,7 @@ data RichChar = RichChar
   { _font :: Font
   , _char :: Char
   }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Read, Data, Typeable)
 makeLenses ''RichChar
 deriveJSON defaultOptions ''RichChar
 
@@ -119,7 +122,7 @@ type FontMetrics = Map RichChar (Double, Double)
 data RichText = RichText
   { _text :: [(Font, Text)]
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show, Read, Data, Typeable)
 makeLenses ''RichText
 deriveJSON defaultOptions ''RichText
 
@@ -144,15 +147,18 @@ data Box c a = Box
   , _boxLineBreak :: Bool
   , _boxContent   :: a
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show, Read, Typeable)
 makeLenses ''Box
+
+-- deriving instance (Typeable c) => Typeable (Box c a)
+deriving instance (Data a, Typeable c, Typeable (Box c a)) => Data (Box c a)
 
 data Image = Image
   { _imageUrl    :: Text
   , _imageWidth  :: Double
   , _imageHeight :: Double
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show, Read, Data, Typeable)
 makeLenses ''Image
 deriveJSON defaultOptions ''Image
 
@@ -163,7 +169,7 @@ data Atom
   | Conflict Atom Atom
   | LineBreak
   | Item
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show, Read, Data, Typeable)
 deriveJSON defaultOptions ''Atom
 
 merge :: Atom -> Atom -> Atom
@@ -191,7 +197,7 @@ data Direction
   = Horizontal
   | Vertical
   | Singleton
-    deriving (Eq, Show)
+    deriving (Eq, Show, Read, Data, Typeable)
 
 type HBox a = Box Horizontal a
 type VBox a = Box Vertical a
@@ -228,7 +234,7 @@ data EditState
   = Inserting
   | Deleting
   | MovingCaret
-    deriving (Show, Eq)
+    deriving (Eq, Show, Read, Data, Typeable)
 
 type ConnectionId = Int
 
@@ -250,3 +256,14 @@ maxEditPos patch =
         Insert i _    -> i
         Delete i _    -> i
         Replace i _ _ -> i
+
+data Document = Document
+ { _patches      :: Seq (Patch Atom)
+ } deriving (Eq, Read, Show)
+makeLenses ''Document
+deriveJSON defaultOptions ''Document
+
+emptyDocument :: Document
+emptyDocument = Document
+ { _patches     = mempty
+ }

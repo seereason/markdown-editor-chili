@@ -54,7 +54,66 @@ In the `LocalDocument` we need to track a few pieces of information:
 
  2. Patches we have created locally
 
- 3. Patches we have sent to the server, but not yet heard back
+ 3. Patches we have sent to the server, but not yet heard back about
 
  4. The Patch that is currently in progress.
 
+We could create a new patch for every single keystroke, mouse
+click, etc. However, it would be inefficient. A `Patch` is just a list
+of `Edit`, and so we instead group a bunch of edits together. The
+exact algorithm for grouping edits will require some fine tuning. In
+theory a `Patch` could contain an arbitrarily large number of
+`Edits`. But, when we have multple clients editing the same
+`Document`, the changes will only be propogated when the client
+submits the `Patch`. So we want the `Patch` granularity to be small
+enough that it gives the feeling of realtime collaboration.
+
+A starting metric would be to create a new patch anytime the user does
+one of the following:
+
+ 1. presses the return key
+
+ 2. presses the backspace/delete key
+
+ 3. clicks on something
+
+ 4. is idle for more than 1 second
+
+ 5. loss of focus, page close, etc
+
+Server <-> Client Communication
+-------------------------------
+
+Because this is a multi-user editor we need bidirection
+communication. The server can send updates to the client at any time
+without provocation. This is implemented using websockets. More on
+that later.
+
+There are a couple situations we need to handle. The server could send
+is a new patch at anytime. That means we need to be able to handle
+merges on the client side, since the patch might conflict with edits
+and patches we have not sent yet.
+
+The client could also become disconnected from the server temporarily
+-- either accidentally or on purpose (offline mode). So we need to
+make use of localStorage to ensure that the patches are not going to
+be lost.
+
+The primary reason for making patches small is so that when multiple
+user are editting the same document you get realtime feeling rather
+than giant chunks of changes.
+
+Since the server knows if there is more than one client, it could vary
+chunk sizes dynamically.
+
+So, this fomulation of `LocalDocument` makes sense:
+
+    data LocalDocument = LocalDocument
+      { _upstreamDocument :: Document
+      , _inflightPatch    :: Maybe Patch
+      , _currentEdit      :: [Edit Atom]
+      }
+
+The `_inflightPatch` is the one we are currently sending (or trying to
+send) to the server. We can continue to keep the `_currentEdit` open
+until we receive the applied patch back from the server.

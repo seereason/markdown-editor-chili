@@ -1,8 +1,9 @@
 module Main where
 
-import Common               (Atom, ConnectionId, merge)
+import Common               (Atom, ConnectionId, Document(..), emptyDocument, merge, patches)
 import Control.Monad        (MonadPlus, msum, forever)
 import Control.Monad.Trans  (MonadIO(liftIO))
+import Control.Lens         ((^.))
 import qualified Data.ByteString.Lazy.Char8 as C
 import Control.Concurrent.STM    (atomically)
 import Control.Concurrent.STM.TVar (TVar, newTVar, modifyTVar', readTVar, writeTVar)
@@ -27,17 +28,6 @@ import Web.Editor.API (EditorAPI, WebSocketReq(..), WebSocketRes(..), WSRequest(
 import Network.WebSockets (Connection, ServerApp, acceptRequest, receiveData, sendBinaryData, sendTextData)
 
 instance Monoid ServantErr
-
-data Document = Document
- { patches      :: Seq (Patch Atom)
--- , currentEdit  :: [Edit Atom]
- }
-
-emptyDocument :: Document
-emptyDocument = Document
- { patches     = mempty
--- , currentEdit = []
- }
 
 data ServerState = ServerState
  { nextConnNum :: ConnectionId
@@ -103,17 +93,17 @@ handleReq tvServerState connection connectionId (WebSocketReq req) =
            do ss <- readTVar tvServerState
               let c = connections ss
                   d = document ss
-              let serverPatch = mconcat (Foldable.toList $ Seq.drop (forkedAt + 1) (patches d))
+              let serverPatch = mconcat (Foldable.toList $ Seq.drop (forkedAt + 1) (d ^. patches))
                   (_, newPatch) = transformWith merge serverPatch patchCandidate
-                  doc' = d { patches = (patches d) |> newPatch }
-                  i    = Seq.length (patches doc') - 1
+                  doc' = d { _patches = (d ^. patches) |> newPatch }
+                  i    = Seq.length (doc' ^. patches) - 1
               writeTVar tvServerState  (ss { document = doc'})
               pure (c, (i, newPatch))
          let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResAppendPatch connectionId r)))
          mapM_ (\(_, conn) -> sendTextData conn msg) conns
     ReqInit ->
-      do ps <- atomically $ do (patches . document) <$> readTVar tvServerState
-         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResInit connectionId ps)))
+      do document <- atomically $ do document <$> readTVar tvServerState
+         let msg = Builder.toLazyText (encodeToTextBuilder (toJSON (ResInit connectionId document)))
          sendTextData connection msg
 {-
     (WebSocketReq (ReqUpdateCurrent edits)) ->
