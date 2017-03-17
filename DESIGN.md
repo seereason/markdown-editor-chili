@@ -81,6 +81,19 @@ one of the following:
 
  5. loss of focus, page close, etc
 
+ 6. changes `edit mode`
+
+Metric 6 is not optional. Because of the way `patches-vector` is
+implemented it is impossible for Delete to undo an Insert from the
+same patch.
+
+That is because all edits (Inserts, Deletes, Replaces) are calculated
+from the offset in the original document. So, while a patch could both
+Insert and Delete atoms, it could not Insert and then Delete the same
+atom. In the case of an editor, it seems hardly worthwhile to try to
+optimize things to allow for the few cases where Insert and Delete
+could both coexist in the same patch.
+
 Server <-> Client Communication
 -------------------------------
 
