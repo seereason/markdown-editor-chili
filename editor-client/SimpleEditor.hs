@@ -925,7 +925,7 @@ initAction sendWS withModel = withModel $ \model ->
               cb <- asyncCallback $ activityTimeout withModel
               js_setTimeout cb 2000
 
-resInit conn initDoc model =
+resInit withModel conn initDoc = withModel $ \model ->
   do let toRCs :: Atom -> [RichChar]
          toRCs (Img {})      = []
          toRCs (LineBreak)   = []
@@ -945,35 +945,38 @@ resInit conn initDoc model =
                                        & (localDocument . forkedAt) .~ (Seq.length (initDoc ^. patches) - 1)
                                        & (localDocument . pendingEdit) .~ [])
 
-resAppendPatch connId (patchId, newPatch) model
-  | model ^. connectionId == (Just connId) =
-      do putStrLn "resAppendPatch: Got own patch back"
-         let model' = updateLayout $
-               model & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                     & (localDocument . inflightPatch) .~ Nothing
-                     & (localDocument . forkedAt) .~ patchId
-         pure (Just model') -- got our own patch back
+resAppendPatch sendWS withModel connId (patchId, newPatch) =
+  withModel $ \model ->
+   do model' <-  case () of
+       () | model ^. connectionId == (Just connId) ->
+            do putStrLn "resAppendPatch: Got own patch back"
+               let model' = updateLayout $
+                     model & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                           & (localDocument . inflightPatch) .~ Nothing
+                           & (localDocument . forkedAt) .~ patchId
+               pure model' -- got our own patch back
 
-  | otherwise              = -- FIXME: probably need to call transform on the patch in progress
-      do let toRCs :: Atom -> [RichChar]
-             toRCs (Img {})      = []
-             toRCs (LineBreak)   = []
-             toRCs (RC rc) = [rc]
-             toRCs (RT rt) = richTextToRichChars rt
-             toRCs' :: Edit Atom -> [RichChar]
-             toRCs' (Insert _ a) = toRCs a
-             toRCs' (Delete _ _) = []
-             toRCs' (Replace _ _ a) = toRCs a
-         putStrLn $ "resAppendPatch: Got someone elses patch"
-         newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList newPatch))
-         let model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
-                                          & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                                          & (localDocument . forkedAt) .~ patchId
-                                    )
-             newCaret = if maxEditPos newPatch < (model ^. caret)
-                               then (model ^. caret) + patchDelta (newPatch)
-                               else (model ^. caret)
-         pure (Just $ model' & caret .~ newCaret)
+          | otherwise              ->   -- FIXME: probably need to call transform on the patch in progress
+              do let toRCs :: Atom -> [RichChar]
+                     toRCs (Img {})      = []
+                     toRCs (LineBreak)   = []
+                     toRCs (RC rc) = [rc]
+                     toRCs (RT rt) = richTextToRichChars rt
+                     toRCs' :: Edit Atom -> [RichChar]
+                     toRCs' (Insert _ a) = toRCs a
+                     toRCs' (Delete _ _) = []
+                     toRCs' (Replace _ _ a) = toRCs a
+                 putStrLn $ "resAppendPatch: Got someone elses patch"
+                 newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList newPatch))
+                 let model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
+                                                  & (localDocument . document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
+                                                  & (localDocument . forkedAt) .~ patchId
+                                           )
+                     newCaret = if maxEditPos newPatch < (model ^. caret)
+                                  then (model ^. caret) + patchDelta (newPatch)
+                                  else (model ^. caret)
+                 pure (model' & caret .~ newCaret)
+      Just <$> sendPatch sendWS model'
 
 {-
   | model ^. connectionId == (Just connId) = pure Map.empty
@@ -1024,23 +1027,23 @@ logMessage messageEvent =
                               consoleLog (JS.pack (show (toByteString 0 Nothing buf)))
                               -- -- (show ((decodeStrict (toByteString 0 Nothing (createFromArrayBuffer r))) :: Maybe WebSocketRes)))
 
-handleMessage :: MessageEvent -> WithModel Model -> IO ()
-handleMessage messageEvent withModel = withModel $ \model ->
+handleMessage :: (WebSocketReq -> IO ()) -> MessageEvent -> WithModel Model -> IO ()
+handleMessage sendWS messageEvent withModel =
   do logMessage messageEvent
      case decodeRes messageEvent of
        Nothing ->
          do putStrLn "handleMessage: unable to decode response"
-            pure Nothing
+            pure ()
        (Just res) ->
          case res of
-           (ResAppendPatch connId (i, path)) -> resAppendPatch connId (i, path) model
-           (ResInit connId doc) -> resInit connId doc model
+           (ResAppendPatch connId (i, path)) -> resAppendPatch sendWS withModel connId (i, path)
+           (ResInit connId doc) -> resInit withModel connId doc
 
 decodeRes :: MessageEvent -> (Maybe WebSocketRes)
 decodeRes messageEvent =
   case MessageEvent.getData messageEvent of
     (StringData str) -> decodeStrict (CS.pack (JS.unpack str))
-{-    
+{-
         Nothing      -> Nothing
         (Just wsres) -> Ju
           case wsres of
