@@ -25,7 +25,7 @@ executable editor-client
 --                       isomaniac >= 0.2,
                        lens,
                        patches-vector,
-                       servant,
+--                       servant,
 --                       servant-isomaniac,
                        stm,
                        text >=1.2 && <1.3,

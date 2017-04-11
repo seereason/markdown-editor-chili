@@ -22,12 +22,12 @@ import Data.Proxy (Proxy(..))
 import Data.Monoid (Monoid)
 import Happstack.Server (Response, ServerPartT, Browsing(EnableBrowsing), asContentType, dir, simpleHTTP, nullConf, nullDir, serveDirectory, serveFile, seeOther, toResponse)
 import Happstack.Server.WebSockets (runWebSocketsHappstack)
-import Servant.API hiding (Patch)
-import Servant.Happstack
+-- import Servant.API hiding (Patch)
+-- import Servant.Happstack
 import Web.Editor.API (EditorAPI, WebSocketReq(..), WebSocketRes(..), WSRequest(..))
 import Network.WebSockets (Connection, ServerApp, acceptRequest, receiveData, sendBinaryData, sendTextData)
 
-instance Monoid ServantErr
+-- instance Monoid ServantErr
 
 data ServerState = ServerState
  { nextConnNum :: ConnectionId
@@ -41,11 +41,11 @@ initialServerState =
              , connections = []
              , document    = emptyDocument
              }
-
+{-
 editorAPI :: Proxy EditorAPI
 editorAPI = Proxy
-
-patchPost thePatch = pure ()
+-}
+-- patchPost thePatch = pure ()
 
 editorApp :: TVar ServerState -> ServerApp
 editorApp tvServerState pendingConnection =
@@ -120,10 +120,11 @@ websockets :: (MonadIO m) =>
            -> ServerPartT m Response
 websockets tvServerState = runWebSocketsHappstack (editorApp tvServerState)
 
-editorServer :: TVar ServerState -> Server EditorAPI
-editorServer tvServerState = patchPost :<|> serveClient
+-- editorServer :: TVar ServerState -> Server EditorAPI
+editorServer :: (MonadIO m, MonadPlus m) => TVar ServerState -> ServerPartT m Response
+editorServer tvServerState = dir "editor" $ serveClient
   where
-    serveClient :: (MonadPlus m, MonadIO m) => ServerPartT m Response
+    serveClient :: (MonadIO m, MonadPlus m) => ServerPartT m Response
     serveClient =
       let basePath = "../editor-client/.cabal-sandbox/bin/editor-client.jsexe/"
       in  msum [ nullDir >> seeOther ("/editor/index.html" :: String) (toResponse ())
@@ -139,4 +140,4 @@ editorServer tvServerState = patchPost :<|> serveClient
 main :: IO ()
 main =
   do tvServerState <- atomically (newTVar initialServerState)
-     simpleHTTP nullConf $ serve editorAPI (editorServer tvServerState)
+     simpleHTTP nullConf $ editorServer tvServerState

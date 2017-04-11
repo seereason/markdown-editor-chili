@@ -6,7 +6,7 @@ let
 
   f = { mkDerivation, acid-state, aeson, base, bytestring, containers
       , filepath, happstack-server, hsp, lens, mtl
-      , safecopy, servant, servant-happstack, stdenv, text, time
+      , safecopy, stdenv, text, time
       , web-routes, cabal-install, cabal2nix, patches-vector, hsx2hs
       , websockets, happstack-websockets, userid
       }:
@@ -18,7 +18,7 @@ let
         isExecutable = true;
         executableHaskellDepends = [
           acid-state aeson base bytestring containers filepath
-          happstack-server hsp lens mtl safecopy servant servant-happstack
+          happstack-server hsp lens mtl safecopy
           text time web-routes patches-vector hsx2hs websockets
 	  happstack-websockets userid
         ];
