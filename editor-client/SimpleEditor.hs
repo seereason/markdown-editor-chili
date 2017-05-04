@@ -100,6 +100,7 @@ data SelectionData = SelectionData
   { _selection       :: Selection
   , _selectionString :: String
   , _rangeCount      :: Int
+  , _documentRange   :: Maybe (Int, Int)
   }
 makeLenses ''SelectionData
 
@@ -515,16 +516,33 @@ getFontMetric measureElm rc@(RichChar font c) =
          h = height domRect
      pure (rc, (w, font ^. fontSize)) -- FIXME: for some reason `height domRect` does not return the right value
 
-getSelectionData :: IO (Maybe SelectionData)
-getSelectionData =
+getSelectionData :: Model -> IO (Maybe SelectionData)
+getSelectionData m =
   do w <- window
+     (Just d) <- currentDocument
      sel <- getSelection w
 --     js_alert =<< (selectionToString sel)
      c <- getRangeCount sel
      txt <- selectionToString sel
-     pure $ Just $ SelectionData { _selection = sel
+     range0 <- getRangeAt sel 0
+--     bounds <- getBoundingClientRect range0
+--     startElem <- startContainer range0
+     s <- js_rangeToString range0
+     print ("rangeToString", s)
+     rects <- getClientRects range0
+     print (clientRectsLength rects)
+     when (clientRectsLength rects > 0) $ do
+       s <- clientRectIx rects 0
+       print (crLeft s, crTop s)
+--     rangeS <- createRange d
+--     selectNode rangeS startElem
+--     startElemBounds <- getBoundingClientRect startElem
+--     endElem <- fmap (JSElement . unJSNode) (endContainer range0)
+--     endElemBounds <- getBoundingClientRect endElem
+     pure $ Just $ SelectionData { _selection       = sel
                                  , _selectionString = JS.unpack txt
-                                 , _rangeCount = c
+                                 , _rangeCount      = c
+                                 , _documentRange   = Nothing
                                  }
 
 
@@ -536,8 +554,8 @@ foreign import javascript unsafe "$1[\"clipboardData\"][\"getData\"](\"text/plai
 foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
         JSElement -> IO ()
 
-foreign import javascript unsafe "window[\"setTimeout\"]($1, $2)" js_setTimeout ::
-  Callback (IO ()) -> Int -> IO ()
+-- foreign import javascript unsafe "window[\"setTimeout\"]($1, $2)" js_setTimeout ::
+--  Callback (IO ()) -> Int -> IO ()
 
 -- | return a Map of any new metrics
 calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
@@ -700,6 +718,11 @@ updateEditorPos model =
      rect <- getBoundingClientRect editorElem
      pure $ model { _editorPos = Just rect}
 
+refocus :: Model -> IO ()
+refocus model =
+  do (Just doc)        <- currentDocument
+     (Just editorElem) <- getElementById doc "editor"
+     focus editorElem
 
 keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> WithModel Model -> IO ()
 keyPressed sendWS e withModel = withModel $ \model'' ->
@@ -774,6 +797,7 @@ clickEditor sendWS e withModel = withModel $ \model'' ->
 boldChange :: MouseEventObject -> WithModel Model -> IO ()
 boldChange e withModel = withModel $ \model->
   do preventDefault e
+     refocus model
      pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
 
 italicChange :: MouseEventObject -> WithModel Model -> IO ()
@@ -794,6 +818,13 @@ editorCopy e withModel =  withModel $ \model->
      dt <- clipboardData e
      setDataTransferData dt "text/plain" "boo-yeah"
      pure $ Just $ model & debugMsg .~ Just "copy"
+
+updateSelection :: SelectionEventObject -> WithModel Model -> IO ()
+updateSelection e withModel =
+  withModel $ \model -> do
+--    js_alert "updateSelection"
+    sel <- getSelectionData model
+    pure $ Just $ model & selectionData .~ sel
 
 app :: (WebSocketReq -> IO ()) -> Model -> Html Model
 app sendWS model =
@@ -832,8 +863,9 @@ app sendWS model =
                                      (Just selectionData) ->
                                        <div>
                                         <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
-                                        <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
+                                        <p>Selection: string len=<% show $ length $ selectionData ^. selectionString %></p>
                                         <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                                        <p>Selection: documentRange=<% show $ selectionData ^. documentRange %></p>
                                        </div>
                                 %>
                              <p>Current Font <% show (model ^. currentFont) %></p>
@@ -855,11 +887,12 @@ app sendWS model =
               </div>
              </div>
             </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [ EL KeyPress (keyPressed sendWS)
-          , EL KeyDown  (keyDowned sendWS)
-          , EL Click    (clickEditor sendWS)
-          , EL Copy     editorCopy
-          ] >
+            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
+                             , EL KeyDown  (keyDowned sendWS)
+                             , EL Click    (clickEditor sendWS)
+                             , EL Copy     editorCopy
+                             , OnCreate (\el _ -> focus el)
+                             ] >
             <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
                <% renderLayout (model ^. layout) %>
             </div>
@@ -871,7 +904,7 @@ chili app initAction model url handleWS =
   do (Just doc)   <- currentDocument
      (Just murv) <- getElementById doc "murv"
 --     (Just body)  <- item nodes 0
-     loop doc (toJSNode murv) model initAction url handleWS app
+     loop doc (toJSNode murv) model initAction (Just url) handleWS app
 --     initRemoteWS url (handleWS updateModel)
 --     updateModel initAction
 
@@ -908,9 +941,11 @@ initAction sendWS withModel = withModel $ \model ->
      newMetrics <- calcMetrics (model ^. fontMetrics) rcs
      sendWS (WebSocketReq ReqInit)
 
-     -- FIXME: perhaps this should be attached to the <body> tag?
      cb <- asyncCallback $ activityTimeout withModel
      js_setTimeout cb 2000
+
+     (Just doc) <- currentDocument
+     addEventListener doc SelectionChange (\e -> updateSelection e withModel) False
 
      pure (Just $ model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
        where
