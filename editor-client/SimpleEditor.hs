@@ -132,6 +132,11 @@ flattenDocument localDoc =
                      then apply p d
                         else d {-FIXME -}) doc' pendingPatches'
 
+data MouseActivity
+     = MouseNoop
+     | MouseDowned MouseEventObject
+--     | MouseMoved MouseEventObject
+
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
@@ -149,8 +154,10 @@ data Model = Model
   , _layout        :: VBox [HBox [AtomBox]]
   , _maxWidth      :: Double
   , _selectionData :: Maybe SelectionData
+  , _currentRange  :: Maybe Range
   , _userId        :: UserId
   , _lastActivity  :: POSIXTime
+  , _mouseActivity :: MouseActivity
   }
 makeLenses ''Model
 
@@ -494,7 +501,7 @@ indexAtPos :: FontMetrics           -- ^ font metrics for characters in this doc
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
    Nothing -> Nothing
-   (Just i) -> Just $ (sumPrevious $ take i (vbox ^. boxContent)) + indexAtX fm ((vbox ^. boxContent)!!i) x
+   (Just i) -> Just $ sumPrevious $ take i (vbox ^. boxContent)) + indexAtX fm ((vbox ^. boxContent)!!i) x
    where
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumPrevious vboxes = sum (map sumLine vboxes)
@@ -524,16 +531,16 @@ getSelectionData m =
 --     js_alert =<< (selectionToString sel)
      c <- getRangeCount sel
      txt <- selectionToString sel
-     range0 <- getRangeAt sel 0
+--     range0 <- getRangeAt sel 0
 --     bounds <- getBoundingClientRect range0
 --     startElem <- startContainer range0
-     s <- js_rangeToString range0
-     print ("rangeToString", s)
-     rects <- getClientRects range0
-     print (clientRectsLength rects)
-     when (clientRectsLength rects > 0) $ do
-       s <- clientRectIx rects 0
-       print (crLeft s, crTop s)
+--     s <- js_rangeToString range0
+--     print ("rangeToString", s)
+--     rects <- getClientRects range0
+--     print (clientRectsLength rects)
+--     when (clientRectsLength rects > 0) $ do
+--       s <- clientRectIx rects 0
+--       print (crLeft s, crTop s)
 --     rangeS <- createRange d
 --     selectNode rangeS startElem
 --     startElemBounds <- getBoundingClientRect startElem
@@ -794,6 +801,107 @@ clickEditor sendWS e withModel = withModel $ \model'' ->
        (Just i) -> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
 
+buttonUp :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
+buttonUp sendWS e model'' =
+  do model <- updateEditorPos model''
+     let elem = target e
+     targetRect <- getBoundingClientRect elem
+     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         model' = model & mousePos  ?~ (clientX e, clientY e)
+                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & targetPos .~ (Just targetRect)
+                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+     case mIndex of
+       (Just i) -> handleAction sendWS (MoveCaret i) model'
+       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+
+updateSelection' :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
+updateSelection' sendWS e model'' =
+  do model <- updateEditorPos model''
+     let elem = target e
+     targetRect <- getBoundingClientRect elem
+     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         model' = model & mousePos  ?~ (clientX e, clientY e)
+                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & targetPos .~ (Just targetRect)
+                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+     case mIndex of
+       (Just i) ->
+         do case model ^. currentRange of
+              Nothing -> pure Nothing
+              (Just r) ->
+                do putStrLn $ "Selection extended to index="++ show i
+                   setEnd r (toJSNode elem) 0
+                   handleAction sendWS (MoveCaret i) model'
+       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+
+{-
+The object that emits the MouseEvent is typically something like a
+span. But we want to be able to select subtext, so we need to know the
+offset into that span.
+-}
+
+startSelection :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
+startSelection sendWS e model'' =
+  do model <- updateEditorPos model''
+     let elem = target e
+     targetRect <- getBoundingClientRect elem
+     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         model' = model & mousePos  ?~ (clientX e, clientY e)
+                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & targetPos .~ (Just targetRect)
+                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+     case mIndex of
+       (Just i) ->
+         do putStrLn $ "Selection started at index="++ show i
+            w     <- window
+            sel   <- getSelection w
+            range <- newRange
+            removeAllRanges sel
+            setStart range (toJSNode elem) 0
+            setEnd range (toJSNode elem) 0
+            addRange sel range
+            handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range)
+
+       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+
+
+
+{-
+
+Manual Mouse Handling:
+
+If the mouse is clicked and released in the same position then we move the caret.
+
+If the mouse is click, dragged, and released, then we update the selection -- and move the caret to the release point?
+
+-}
+
+selectEditor :: (WebSocketReq -> IO ()) -> MouseEvent -> MouseEventObject -> WithModel Model -> IO ()
+selectEditor sendWS mouseEV mouseEventObject withModel =
+  do -- putStrLn $ "selectEditor: " ++ show mouseEV
+     preventDefault mouseEventObject
+     withModel $ \m ->
+       case m ^. mouseActivity of
+         MouseNoop ->
+           case mouseEV of
+             MouseDown ->
+               do (Just m') <- startSelection sendWS mouseEventObject m
+                  pure $ Just $ m' & mouseActivity .~ (MouseDowned mouseEventObject)
+             _ -> pure Nothing
+         MouseDowned oldMEO ->
+           case mouseEV of
+             MouseMove ->
+               do (Just m') <- updateSelection' sendWS mouseEventObject m
+                  pure (Just m')
+
+             MouseUp ->
+               do (Just m') <- buttonUp sendWS mouseEventObject m
+                  pure $ Just $ m' & mouseActivity .~ MouseNoop
+
 boldChange :: MouseEventObject -> WithModel Model -> IO ()
 boldChange e withModel = withModel $ \model->
   do preventDefault e
@@ -889,7 +997,11 @@ app sendWS model =
             </div>
             <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
                              , EL KeyDown  (keyDowned sendWS)
-                             , EL Click    (clickEditor sendWS)
+                             , EL MouseDown (selectEditor sendWS MouseDown)
+                             , EL MouseUp   (selectEditor sendWS MouseUp)
+                             , EL MouseMove (selectEditor sendWS MouseMove)
+--                             , EL Click (selectEditor sendWS Click)
+--                             , EL Click    (clickEditor sendWS)
                              , EL Copy     editorCopy
                              , OnCreate (\el _ -> focus el)
                              ] >
@@ -931,8 +1043,10 @@ initModel = Model
   , _layout        = Box 0 0 False []
   , _maxWidth      = 300
   , _selectionData = Nothing
+  , _currentRange  = Nothing
   , _userId        = UserId 0
   , _lastActivity  = 0
+  , _mouseActivity = MouseNoop
   }
 
 initAction :: (WebSocketReq -> IO ()) -> WithModel Model -> IO ()
@@ -944,8 +1058,8 @@ initAction sendWS withModel = withModel $ \model ->
      cb <- asyncCallback $ activityTimeout withModel
      js_setTimeout cb 2000
 
-     (Just doc) <- currentDocument
-     addEventListener doc SelectionChange (\e -> updateSelection e withModel) False
+--     (Just doc) <- currentDocument
+--     addEventListener doc SelectionChange (\e -> updateSelection e withModel) False
 
      pure (Just $ model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
        where
