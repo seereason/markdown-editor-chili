@@ -100,7 +100,6 @@ data SelectionData = SelectionData
   { _selection       :: Selection
   , _selectionString :: String
   , _rangeCount      :: Int
-  , _documentRange   :: Maybe (Int, Int)
   }
 makeLenses ''SelectionData
 
@@ -155,6 +154,7 @@ data Model = Model
   , _maxWidth      :: Double
   , _selectionData :: Maybe SelectionData
   , _currentRange  :: Maybe Range
+  , _documentRange :: Maybe (Int, Int)
   , _userId        :: UserId
   , _lastActivity  :: POSIXTime
   , _mouseActivity :: MouseActivity
@@ -627,7 +627,6 @@ getSelectionData m =
      pure $ Just $ SelectionData { _selection       = sel
                                  , _selectionString = JS.unpack txt
                                  , _rangeCount      = c
-                                 , _documentRange   = Nothing
                                  }
 
 
@@ -927,8 +926,9 @@ updateSelection' sendWS e model'' =
                    putStrLn $ JS.unpack nn
                    (Just lines) <- getFirstChild editorNode
                    mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
-                   case mSelNode of
-                     Nothing -> print "error: could not find selected node"
+                   model'' <- case mSelNode of
+                     Nothing -> do print "error: could not find selected node"
+                                   pure model'
                      (Just selNode) ->
                        do nt <- nodeType selNode
                           putStrLn $ nodeTypeString nt
@@ -941,7 +941,14 @@ updateSelection' sendWS e model'' =
                           putStrLn $ JS.unpack nn
                           jstr <- nodeValue textNode
                           putStrLn $ JS.unpack jstr
-                          setEnd r (toJSNode textNode) si
+                          case model ^. documentRange of
+                            Nothing -> pure ()
+                            (Just (b,e))
+                              | i > b ->
+                                setEnd r (toJSNode textNode) si
+                              | i <= b ->
+                                setStart r (toJSNode textNode) si
+                          pure model'
 
 {-
                    nt <- nodeType elem
@@ -955,8 +962,8 @@ updateSelection' sendWS e model'' =
                    putStrLn $ JS.unpack nn
                    setEnd r (toJSNode elem) 0
 -}
-                   handleAction sendWS (MoveCaret i) model'
-       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+                   handleAction sendWS (MoveCaret i) (model'' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
+       Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
 
 {-
 The object that emits the MouseEvent is typically something like a
@@ -1008,7 +1015,9 @@ startSelection sendWS e model'' =
                    setStart range (toJSNode textNode) si
                    setEnd range (toJSNode textNode) si
             addRange sel range
-            handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range)
+            handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
+                                                      & documentRange .~ Just (i, i)
+                                              )
 
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
 
@@ -1117,9 +1126,10 @@ app sendWS model =
                                         <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
                                         <p>Selection: string len=<% show $ length $ selectionData ^. selectionString %></p>
                                         <p>Selection: toString()=<% selectionData ^. selectionString %></p>
-                                        <p>Selection: documentRange=<% show $ selectionData ^. documentRange %></p>
                                        </div>
                                 %>
+                             <p>Selection: documentRange=<% show $ model ^. documentRange %></p>
+
                              <p>Current Font <% show (model ^. currentFont) %></p>
                              <p>Font Metrics <% show (model ^. fontMetrics) %></p>
 
@@ -1188,6 +1198,7 @@ initModel = Model
   , _maxWidth      = 300
   , _selectionData = Nothing
   , _currentRange  = Nothing
+  , _documentRange = Nothing
   , _userId        = UserId 0
   , _lastActivity  = 0
   , _mouseActivity = MouseNoop
