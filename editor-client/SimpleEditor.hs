@@ -465,43 +465,121 @@ lineAtY vbox y = go (vbox ^. boxContent) y 0
       else go hboxes (y - hbox ^. boxHeight) (succ n)
 
 -- If we put Characters in boxes then we could perhaps generalize this
-indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> Int
+--
+-- (index relative to start, index relative to hbox it is in)
+indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> (Int, Int)
 indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
-    indexAtX' :: [RichChar] -> Double -> Int -> Int
-    indexAtX' [] x i = i
-    indexAtX' (c:cs) x i =
+    indexAtX' :: [RichChar] -> Double -> (Int, Int) -> (Int, Int)
+    indexAtX' [] x (i, si) = (i, si)
+    indexAtX' (c:cs) x (i, si) =
       let cWidth =  fst $ fromJust $ Map.lookup c fm
       in if x < cWidth
-         then i
-         else indexAtX' cs (x - cWidth) (succ i)
-    go :: [AtomBox] -> Double -> Int -> Int
-    go [] x i = i
+         then (i, si)
+         else indexAtX' cs (x - cWidth) (succ i, succ si)
+    go :: [AtomBox] -> Double -> Int -> (Int, Int)
+    go [] x i = (i, i)
     go (box:boxes) x i =
       case box ^. boxContent of
         (RT txt)
          | x < (box ^. boxWidth) ->
-            indexAtX' (richTextToRichChars txt) x i
+            indexAtX' (richTextToRichChars txt) x (i, 0)
          | otherwise -> go boxes (x - box ^. boxWidth) (i + richTextLength txt)
         (Img img)
-         | x < (box ^. boxWidth) -> i
+         | x < (box ^. boxWidth) -> (i, i)
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
         LineBreak
          -> go boxes x (i + 1)
         Item
-         | x < (box ^. boxWidth) -> i
+         | x < (box ^. boxWidth) -> (i, i)
          | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
 
+
+getAtomNode :: Int -> [AtomBox] -> JSNode -> Word -> IO (Maybe JSNode)
+getAtomNode 0 [] parent childNum = pure Nothing
+getAtomNode 0 (atom:atoms) parent childNum =
+  do putStrLn $ "getAtomNode childNum=" ++ show childNum
+     children <- childNodes parent
+     item children childNum
+getAtomNode n (atom:atoms) parent childNum =
+  case atomLength (atom ^. boxContent) of
+    n' | n >= n' -> getAtomNode (n - n') atoms parent (childNum + 1)
+       | otherwise ->
+           do putStrLn $ "getAtomNode childNum=" ++ show childNum
+              children <- childNodes parent
+              item children childNum
+
+atomboxLength :: AtomBox -> Int
+atomboxLength ab = atomLength (ab ^. boxContent)
+
+hboxLength :: HBox [AtomBox] -> Int
+hboxLength hbox =
+  sum (map atomboxLength (hbox ^. boxContent))
+
+vboxLength :: VBox [HBox [AtomBox]] -> Int
+vboxLength vbox =
+  sum (map (\hbox -> sum (map atomboxLength (hbox ^. boxContent))) (vbox ^. boxContent))
+
+getHBoxNode :: Int -> [HBox [AtomBox]] -> JSNode -> Word -> IO (Maybe JSNode)
+getHBoxNode n [] _ _ = pure Nothing
+getHBoxNode 0 (hbox:hboxes) parent childNum =
+  do children <- childNodes parent
+     mchild <- item children childNum
+     case mchild of
+       Nothing -> pure Nothing
+       (Just child) -> getAtomNode 0 (hbox ^. boxContent) child 0
+getHBoxNode n (hbox:hboxes) parent childNum =
+  case hboxLength hbox of
+    n' | n >= n' -> getHBoxNode (n - n') hboxes parent (childNum + 1)
+       | otherwise ->
+           do children <- childNodes parent
+              mchild <- item children childNum
+              case mchild of
+                Nothing -> pure Nothing
+                (Just child) -> getAtomNode n (hbox ^. boxContent) child 0
+{-
+getVBoxNode :: Int -> [VBox [HBox [AtomBox]]] -> JSNode -> Word -> IO (Maybe JSNode)
+getVBoxNode n [] _ _ = pure Nothing
+getVBoxNode 0 (vbox:vboxes) parent childNum =
+  do children <- childNodes parent
+     mchild <- item children childNum
+     case mchild of
+       Nothing -> pure Nothing
+       (Just child) -> getHBoxNode 0 (vbox ^. boxContent) child 0
+getVBoxNode n (vbox:vboxes) parent childNum =
+  case vboxLength vbox of
+    n' | n >= n' -> getVBoxNode (n - n') vboxes parent (childNum + 1)
+       | otherwise ->
+           do children <- childNodes parent
+              mchild <- item children childNum
+              case mchild of
+                Nothing -> pure Nothing
+                (Just child) -> getHBoxNode n (vbox ^. boxContent) child 0
+-}
+{-
+nodeAtIndex :: Int -> VBox [HBox [AtomBox]] -> JSNode -> Maybe JSNode
+nodeAtIndex 0 layout parentNode =
+  case layout of
+    ((Box _ _ _ hbox):_) ->
+      case hbox of
+        (Box _ _ _ atoms) ->
+          case atoms of
+            (atom:_) ->
+              case atom of
+                (RC RichChar) -> 
+-}
 -- | calculate the index to Atom in the document which is the hit
 -- target of the provided (x,y) coordinates
 indexAtPos :: FontMetrics           -- ^ font metrics for characters in this document
            -> VBox [HBox [AtomBox]] -- ^ current layout of the document
            -> (Double, Double)      -- ^ (x,y) coordinates relative to the top-left of the editor div
-           -> Maybe Int             -- ^ index of atom if a match was found
+           -> Maybe (Int, Int)             -- ^ index of atom if a match was found
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
    Nothing -> Nothing
-   (Just i) -> Just $ sumPrevious $ take i (vbox ^. boxContent)) + indexAtX fm ((vbox ^. boxContent)!!i) x
+   (Just i) ->
+     let (ix, subIx) = (indexAtX fm ((vbox ^. boxContent)!!i) x)
+     in Just $ ((sumPrevious $ take i (vbox ^. boxContent)) + ix, subIx)
    where
 --     sumPrevious :: VBox [HBox [TextBox]] -> Maybe Int
      sumPrevious vboxes = sum (map sumLine vboxes)
@@ -618,11 +696,17 @@ renderAtomBoxes lines =
   [hsx| <div class="lines"><% map renderAtomBoxes' (lines ^. boxContent) %></div> |]
 
 -- render a layout (vertical list of horizontal lists of AtomBoxes) to Html
+--
+-- If you change this function or any of the functions it calls, it
+-- can affect the getHBoxNode and friends functions. Obviously, we
+-- should use a better abstraction so that things can not get out of
+-- sync
+
 renderLayout :: VBox [HBox [AtomBox]]
           -> Html Model
 renderLayout lines =
   [hsx|
-    <div data-path="root">
+    <div id="editor-layout" data-path="root">
      <% renderAtomBoxes lines %>
 --        <% textToHtml fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
@@ -792,7 +876,7 @@ clickEditor sendWS e withModel = withModel $ \model'' ->
      let elem = target e
      targetRect <- getBoundingClientRect elem
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         mIndex = fst <$> indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
@@ -807,7 +891,7 @@ buttonUp sendWS e model'' =
      let elem = target e
      targetRect <- getBoundingClientRect elem
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         mIndex = fst <$> indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
@@ -824,16 +908,53 @@ updateSelection' sendWS e model'' =
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
          mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
-                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
                         & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
      case mIndex of
-       (Just i) ->
+       (Just (i, si)) ->
          do case model ^. currentRange of
               Nothing -> pure Nothing
               (Just r) ->
-                do putStrLn $ "Selection extended to index="++ show i
+                do putStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
+
+                   (Just doc) <- currentDocument
+                   (Just editorNode) <- getElementById  doc "editor-layout"
+                   print "editor-layout"
+                   nt <- nodeType editorNode
+                   putStrLn $ nodeTypeString nt
+                   nn <- nodeName editorNode
+                   putStrLn $ JS.unpack nn
+                   (Just lines) <- getFirstChild editorNode
+                   mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
+                   case mSelNode of
+                     Nothing -> print "error: could not find selected node"
+                     (Just selNode) ->
+                       do nt <- nodeType selNode
+                          putStrLn $ nodeTypeString nt
+                          nn <- nodeName selNode
+                          putStrLn $ JS.unpack nn
+                          (Just textNode) <- getFirstChild selNode
+                          nt <- nodeType textNode
+                          putStrLn $ nodeTypeString nt
+                          nn <- nodeName textNode
+                          putStrLn $ JS.unpack nn
+                          jstr <- nodeValue textNode
+                          putStrLn $ JS.unpack jstr
+                          setEnd r (toJSNode textNode) si
+
+{-
+                   nt <- nodeType elem
+                   putStrLn $ nodeTypeString nt
+                   nn <- nodeName elem
+                   putStrLn $ JS.unpack nn
+                   (Just textNode) <- getFirstChild elem
+                   nt <- nodeType textNode
+                   putStrLn $ nodeTypeString nt
+                   nn <- nodeName textNode
+                   putStrLn $ JS.unpack nn
                    setEnd r (toJSNode elem) 0
+-}
                    handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
 
@@ -851,18 +972,41 @@ startSelection sendWS e model'' =
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
          mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
-                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
+                        & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
                         & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
      case mIndex of
-       (Just i) ->
-         do putStrLn $ "Selection started at index="++ show i
+       (Just (i, si)) ->
+         do putStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
             w     <- window
             sel   <- getSelection w
             range <- newRange
             removeAllRanges sel
-            setStart range (toJSNode elem) 0
-            setEnd range (toJSNode elem) 0
+{-
+            nt <- nodeType elem
+            putStrLn $ nodeTypeString nt
+            nn <- nodeName elem
+            putStrLn $ JS.unpack nn
+-}
+            (Just doc) <- currentDocument
+            (Just editorNode) <- getElementById  doc "editor-layout"
+            print "editor-layout"
+            nt <- nodeType editorNode
+            putStrLn $ nodeTypeString nt
+            nn <- nodeName editorNode
+            putStrLn $ JS.unpack nn
+            (Just lines) <- getFirstChild editorNode
+            mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
+            case mSelNode of
+              Nothing -> print "error: could not find selected node"
+              (Just selNode) ->
+                do nt <- nodeType selNode
+                   putStrLn $ nodeTypeString nt
+                   nn <- nodeName selNode
+                   putStrLn $ JS.unpack nn
+                   (Just textNode) <- getFirstChild selNode
+                   setStart range (toJSNode textNode) si
+                   setEnd range (toJSNode textNode) si
             addRange sel range
             handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range)
 

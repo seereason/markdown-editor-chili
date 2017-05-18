@@ -141,6 +141,7 @@ richTextToRichChars :: RichText -> [RichChar]
 richTextToRichChars (RichText texts) =
   concatMap (\(font, txt) -> [ RichChar font c | c <- Text.unpack txt ]) texts
 
+-- might be able to optimize things by including a count of how many atoms are in the box
 data Box c a = Box
   { _boxWidth     :: Double
   , _boxHeight    :: Double
