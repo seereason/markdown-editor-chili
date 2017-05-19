@@ -54,6 +54,7 @@ import qualified Data.Sequence as Seq
 import Data.UserId (UserId(..))
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
+import qualified Data.Vector.Mutable as MVector
 import           GHCJS.Buffer               (toByteString, fromByteString, getArrayBuffer, createFromArrayBuffer)
 import qualified GHCJS.Buffer as Buffer
 import GHCJS.Foreign.Callback (OnBlocked(..), Callback, asyncCallback)
@@ -1055,11 +1056,35 @@ selectEditor sendWS mouseEV mouseEventObject withModel =
                do (Just m') <- buttonUp sendWS mouseEventObject m
                   pure $ Just $ m' & mouseActivity .~ MouseNoop
 
-boldChange :: MouseEventObject -> WithModel Model -> IO ()
-boldChange e withModel = withModel $ \model->
-  do preventDefault e
+-- what if already bold? or a mix of bold and not bold?
+boldRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
+boldRange sendWS (b, e) model' =
+  do model <- sendPatch sendWS model'
+     let flattened = flattenDocument (model ^. localDocument)
+         sub = Vector.slice b (e - b) flattened
+         atoms = zip (Vector.toList sub) [b..e]
+         newEdit = catMaybes (map (\(a, i) ->
+                             case a of
+                               (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  FW700) char))
+                               _ -> Nothing
+                           ) atoms)
+     print flattened
+     print sub
+     print atoms
+     print newEdit
+     pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
+                                        , _caret       = succ (model ^. caret)
+                                        }
+
+boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
+boldChange sendWS ev withModel = withModel $ \model->
+  do preventDefault ev
      refocus model
-     pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
+     case model ^. documentRange of
+       Nothing -> pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
+       (Just (b,e)) ->
+         do stopPropagation ev
+            boldRange sendWS (b,e) model
 
 italicChange :: MouseEventObject -> WithModel Model -> IO ()
 italicChange e withModel =  withModel $ \model->
@@ -1140,7 +1165,7 @@ app sendWS model =
             <div class="form-line editor-toolbar row">
             <div class="col-md-6">
               <div class="btn-group" data-toggle="buttons">
-               <label class="btn btn-default" [ EL Click boldChange ] >
+               <label class="btn btn-default" [ EL Click (boldChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
                <label class="btn btn-default" [ EL Click italicChange ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
