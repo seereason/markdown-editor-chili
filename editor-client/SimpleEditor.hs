@@ -21,6 +21,20 @@ module Main where
 -- NEXT STEP: move layout recalculation into a single location
 -- NEXT STEP: when inserting a foreign patch, we need to update font metrics with any new characters
 
+{-
+
+NOTES:
+
+It would be nice to have a better document representation. At the moment the following operations are rather difficult:
+
+ 1. calculating the index from an (x,y) position
+
+ 2. finding the atom corresponding to an index
+
+ 3. finding the DOM node corresponding to an index
+
+-}
+
 import Common
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TQueue (TQueue, newTQueue, writeTQueue)
@@ -498,18 +512,46 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
 
 getAtomNode :: Int -> [AtomBox] -> JSNode -> Word -> IO (Maybe JSNode)
 getAtomNode 0 [] parent childNum = pure Nothing
-getAtomNode 0 (atom:atoms) parent childNum =
+getAtomNode 0 _ {- (atom:atoms) -} parent childNum =
   do putStrLn $ "getAtomNode childNum=" ++ show childNum
      children <- childNodes parent
      item children childNum
-getAtomNode n (atom:atoms) parent childNum =
+getAtomNode n a@(atom:atoms) parent childNum =
   case atomLength (atom ^. boxContent) of
-    n' | n >= n' -> getAtomNode (n - n') atoms parent (childNum + 1)
+    n' | n >= n' -> getAtomNode (n - n') atoms parent (childNum + (atomNumNodes atom))
        | otherwise ->
+           case atom ^. boxContent of
+             (RT (RichText (txt:txts))) ->
+               if Text.length (snd txt) >= n
+               then getAtomNode 0 a parent childNum
+--               else getAtomNode 0 a parent childNum
+               else do putStrLn $ "getAtomNode length txt = " ++ show (Text.length (snd txt)) ++ " , n = " ++ show n ++ " txt = " ++ show txt
+                       getAtomNode (n - (Text.length (snd txt))) ((atom & boxContent .~ (RT (RichText txts))):[]) parent (childNum + 1)
+
+{-
            do putStrLn $ "getAtomNode childNum=" ++ show childNum
               children <- childNodes parent
               item children childNum
+-}
+{-
+           case atom ^. boxContent of
+             (RT (RichText (txt:txts))) ->
+               if length txt > n
+               then getAtomNode 0 a parent childNum
+               else getAtomNode (n - (length txt)) ((atom & boxContent .~ (RT (RichText txts))):[]) parent (childNum + 1)
+-}
+      where
+        atomNumNodes :: AtomBox -> Word
+        atomNumNodes ab =
+          case ab ^. boxContent of
+            (RT (RichText txts)) -> fromIntegral $ length txts
+            _ -> 1
 
+{-
+           do putStrLn $ "getAtomNode childNum=" ++ show childNum
+              children <- childNodes parent
+              item children childNum
+-}
 atomboxLength :: AtomBox -> Int
 atomboxLength ab = atomLength (ab ^. boxContent)
 
@@ -670,6 +712,8 @@ fontToStyle font =
                           Oblique -> "oblique;")
 
 -- | convert an 'AtomBox' to Html
+--
+-- note to self: a single 'RichText' can end up as multiple separate spans -- one for each element.
 renderAtomBox :: AtomBox
               -> [Html Model]
 -- renderTextBox box = CDATA True (box ^. boxContent)
