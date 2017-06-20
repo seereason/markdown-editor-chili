@@ -62,9 +62,9 @@ import qualified Data.Patch as Patch
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
-import qualified Data.Traversable as T
 import Data.Sequence (Seq, (|>), (<|), viewl, ViewL(..))
 import qualified Data.Sequence as Seq
+import qualified Data.Traversable as T
 import Data.UserId (UserId(..))
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
@@ -154,6 +154,7 @@ data MouseActivity
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
+  , _bolding       :: Bool
   , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
@@ -611,6 +612,18 @@ nodeAtIndex 0 layout parentNode =
               case atom of
                 (RC RichChar) -> 
 -}
+
+allP :: (Atom -> Bool) -> VBox [HBox [AtomBox]] -> Bool
+allP p vbox =
+  all (allP' p) (vbox ^. boxContent)
+  where
+    allP' :: (Atom -> Bool) -> HBox [AtomBox] -> Bool
+    allP' p hbox =
+      all (allP'' p) (hbox ^. boxContent)
+
+    allP'' :: (Atom -> Bool) -> AtomBox -> Bool
+    allP'' p atomBox = p (atomBox ^. boxContent)
+
 -- | calculate the index to Atom in the document which is the hit
 -- target of the provided (x,y) coordinates
 indexAtPos :: FontMetrics           -- ^ font metrics for characters in this document
@@ -882,8 +895,9 @@ keyDowned :: (WebSocketReq -> IO ())
           -> KeyboardEventObject
           -> WithModel Model
           -> IO ()
-keyDowned sendWS e withModel = withModel $ \model ->
+keyDowned sendWS e withModel = withModel $ \model'' ->
  do putStrLn $ "KeyDowned "++ (show $ keyCode e)
+    model <- updateEditorPos model''
     let c = (keyCode e)
     when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (putStrLn "preventDefault" >> preventDefault e)
     newFontMetrics <-
@@ -909,9 +923,9 @@ keyDowned sendWS e withModel = withModel $ \model ->
                              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
                        in handleAction sendWS (InsertAtom (RC rc)) model'
         | c == 37   -> handleAction sendWS (MoveCaret ((model ^. caret) - 1)) model -- left
-        | c == 38   -> pure Nothing -- model                                                   -- up
+        | c == 38   -> pure Nothing -- model                                        -- up
         | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
-        | c == 40   -> pure Nothing -- model                                                   -- down
+        | c == 40   -> pure Nothing -- model                                        -- down
         | otherwise -> pure Nothing -- model
 
 clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
@@ -955,6 +969,7 @@ updateSelection' sendWS e model'' =
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
                         & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+
      case mIndex of
        (Just (i, si)) ->
          do case model ^. currentRange of
@@ -1107,7 +1122,38 @@ boldRange sendWS (b, e) model' =
      let flattened = flattenDocument (model ^. localDocument)
          sub = Vector.slice b (e - b) flattened
          atoms = zip (Vector.toList sub) [b..e]
+         newFontWeight = if allBold atoms then FW400 else FW700
          newEdit = catMaybes (map (\(a, i) ->
+                             case a of
+                               (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  newFontWeight) char))
+                               _ -> Nothing
+                           ) atoms)
+     print flattened
+     print sub
+     print atoms
+     print newEdit
+     pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
+                                        , _caret       = succ (model ^. caret)
+                                        }
+       where
+         isBold :: Atom -> Bool
+         isBold atom =
+           case atom of
+             (RC (RichChar (Font fw _ _) _)) = fw == FW700
+             _ = True
+         allBold :: Vector Atom -> Bool
+         allBold atoms = T.foldr (\atom b -> isBold atom && b) True atoms
+
+
+extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
+extractRange (b, e) localDocument =
+  let flattened = flattenDocument localDocument
+  in Vector.slice b (e - b) flattened
+
+
+{-
+      atoms = zip (Vector.toList sub) [b..e]
+      newEdit = catMaybes (map (\(a, i) ->
                              case a of
                                (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  FW700) char))
                                _ -> Nothing
@@ -1119,13 +1165,16 @@ boldRange sendWS (b, e) model' =
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret       = succ (model ^. caret)
                                         }
+-}
 
 boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 boldChange sendWS ev withModel = withModel $ \model->
   do preventDefault ev
      refocus model
      case model ^. documentRange of
-       Nothing -> pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange")
+       Nothing -> pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400)
+                                       & bolding .~ (not (model ^. bolding))
+                                       & debugMsg .~ Just "BoldChange")
        (Just (b,e)) ->
          do stopPropagation ev
             boldRange sendWS (b,e) model
@@ -1162,7 +1211,7 @@ app sendWS model =
   in
          ([hsx|
            <div>
-             <% if True
+             <% if False
                  then <div style="position: absolute; left: 800px; width: 800px;">
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
@@ -1205,12 +1254,12 @@ app sendWS model =
 
                       </div>
                  else <span></span> %>
-            <h1>Editor</h1>
+            <h1>Super Awesome Editor</h1>
             <div class="form-line editor-toolbar row">
             <div class="col-md-6">
               <div class="btn-group" data-toggle="buttons">
-               <label class="btn btn-default" [ EL Click (boldChange sendWS) ] >
-                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
+               <label class=(if (model ^. bolding) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
                <label class="btn btn-default" [ EL Click italicChange ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
                <label class="btn btn-default" [ EL Click (itemize sendWS) ] >
@@ -1218,7 +1267,7 @@ app sendWS model =
               </div>
              </div>
             </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
+            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
                              , EL KeyDown  (keyDowned sendWS)
                              , EL MouseDown (selectEditor sendWS MouseDown)
                              , EL MouseUp   (selectEditor sendWS MouseUp)
@@ -1252,6 +1301,7 @@ initModel = Model
       , _pendingPatches = Seq.empty
       , _pendingEdit = []
       }
+  , _bolding       = False
   , _itemizing     = False
   , _connectionId  = Nothing
   , _editState     = Inserting
@@ -1290,13 +1340,13 @@ initAction sendWS withModel = withModel $ \model ->
          activityTimeout withModel =
            do now <- getPOSIXTime
               withModel $ \model ->
-                if ((now > (model ^. lastActivity + 2)) && (not $ null $ model ^. localDocument . pendingEdit))
+                if ((now > (model ^. lastActivity + 1)) && (not $ null $ model ^. localDocument . pendingEdit))
                    then do putStrLn "force patch send"
                            model' <- sendPatch sendWS model
                            pure $ Just $ model' & lastActivity .~ now
                    else pure Nothing
               cb <- asyncCallback $ activityTimeout withModel
-              js_setTimeout cb 2000
+              js_setTimeout cb 500
 
 resInit withModel conn initDoc = withModel $ \model ->
   do let toRCs :: Atom -> [RichChar]
