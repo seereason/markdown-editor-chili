@@ -50,6 +50,7 @@ import Data.Char (chr)
 import qualified Data.ByteString.Char8 as CS
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Foldable (foldl')
+import qualified Data.Foldable as F
 import qualified Data.JSString as JS
 import Data.JSString.Text (textToJSString, textFromJSString)
 import Data.List (findIndex, groupBy, nub, null, splitAt)
@@ -494,7 +495,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          then (i, si)
          else indexAtX' cs (x - cWidth) (succ i, succ si)
     go :: [AtomBox] -> Double -> Int -> (Int, Int)
-    go [] x i = (i, i)
+    go [] x i = (i, 0)
     go (box:boxes) x i =
       case box ^. boxContent of
         (RT txt)
@@ -512,14 +513,19 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
 
 
 getAtomNode :: Int -> [AtomBox] -> JSNode -> Word -> IO (Maybe JSNode)
-getAtomNode 0 [] parent childNum = pure Nothing
+getAtomNode 0 [] parent childNum = error $ "getAtomNode 0 []" -- pure Nothing
 getAtomNode 0 _ {- (atom:atoms) -} parent childNum =
   do putStrLn $ "getAtomNode childNum=" ++ show childNum
      children <- childNodes parent
      item children childNum
 getAtomNode n a@(atom:atoms) parent childNum =
   case atomLength (atom ^. boxContent) of
-    n' | n >= n' -> getAtomNode (n - n') atoms parent (childNum + (atomNumNodes atom))
+    n' | n > n' -> getAtomNode (n - n') atoms parent (childNum + (atomNumNodes atom))
+{-
+       | n == n' ->
+           do putStrLn "getAtomNode n == n'"
+              pure Nothing
+-}
        | otherwise ->
            case atom ^. boxContent of
              (RT (RichText (txt:txts))) ->
@@ -564,22 +570,50 @@ vboxLength :: VBox [HBox [AtomBox]] -> Int
 vboxLength vbox =
   sum (map (\hbox -> sum (map atomboxLength (hbox ^. boxContent))) (vbox ^. boxContent))
 
+{-
+Return the node which contains the element at index n.
+
+
+-}
 getHBoxNode :: Int -> [HBox [AtomBox]] -> JSNode -> Word -> IO (Maybe JSNode)
-getHBoxNode n [] _ _ = pure Nothing
+getHBoxNode n [] _ _ = error $ "getHBoxNode: looking for n="++show n ++ " but the document is now []"
+{-
+Here we want the 0th element. So we just get the childNum of the parent.
+-}
 getHBoxNode 0 (hbox:hboxes) parent childNum =
   do children <- childNodes parent
      mchild <- item children childNum
      case mchild of
-       Nothing -> pure Nothing
+       Nothing -> error $ "getHBoxNode could not find childNum=" ++ show childNum --  pure Nothing
        (Just child) -> getAtomNode 0 (hbox ^. boxContent) child 0
+
+{-
+Here n is greater than 0. So we need to look at the hbox and figure out which one contains the atom.
+
+hboxLength is the number of atoms in the hbox. Keep in mind that we are 0-indexing our request.
+
+If the length of an hbox is 2 and we are requesting index 2, then we need to look in the next hbox. If the length is 0 or 1, we look in the current hbox.
+
+Since each hbox is a child of the parent, we increment the childNum by one.
+
+-}
 getHBoxNode n (hbox:hboxes) parent childNum =
   case hboxLength hbox of
-    n' | n >= n' -> getHBoxNode (n - n') hboxes parent (childNum + 1)
+    n' | n > n' ->
+           do putStrLn $ "getHBoxNode n = " ++ show n ++ " n' = " ++ show n'
+              getHBoxNode (n - n') hboxes parent (childNum + 1)
+       | n == n' ->
+           do putStrLn "getHBoxNode n==n'"
+              children <- childNodes parent
+              mchild <- item children childNum
+              case mchild of
+                Nothing      -> error $ "getHBoxNode: mchild is Nothing. Was looking for childNum =" ++ show childNum -- pure Nothing
+                (Just child) -> getAtomNode n (hbox ^. boxContent) child 0
        | otherwise ->
            do children <- childNodes parent
               mchild <- item children childNum
               case mchild of
-                Nothing -> pure Nothing
+                Nothing      -> error $ "getHBoxNode: mchild is Nothing. Was looking for childNum =" ++ show childNum -- pure Nothing
                 (Just child) -> getAtomNode n (hbox ^. boxContent) child 0
 {-
 getVBoxNode :: Int -> [VBox [HBox [AtomBox]]] -> JSNode -> Word -> IO (Maybe JSNode)
@@ -733,7 +767,7 @@ renderAtomBox :: AtomBox
 renderAtomBox box =
   case box ^. boxContent of
     (RT (RichText txts)) -> map renderText txts
-    (Img img)            -> [[hsx| <img src=(img ^. imageUrl) /> |]]
+    (Img img)            -> [[hsx|<img src=(img ^. imageUrl) />|]]
     LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]]
     Item                 -> let (RichText txts) = bullet in map renderText txts
   where
@@ -975,7 +1009,7 @@ updateSelection' sendWS e model'' =
          do case model ^. currentRange of
               Nothing -> pure Nothing
               (Just r) ->
-                do putStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
+                do putStrLn $ "update selection to index="++ show i ++ ", subindex=" ++ show si
 
                    (Just doc) <- currentDocument
                    (Just editorNode) <- getElementById  doc "editor-layout"
@@ -987,7 +1021,7 @@ updateSelection' sendWS e model'' =
                    (Just lines) <- getFirstChild editorNode
                    mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
                    model'' <- case mSelNode of
-                     Nothing -> do print "error: could not find selected node"
+                     Nothing -> do print "error: updateSelection': could not find selected node"
                                    pure model'
                      (Just selNode) ->
                        do nt <- nodeType selNode
@@ -1000,7 +1034,7 @@ updateSelection' sendWS e model'' =
                           nn <- nodeName textNode
                           putStrLn $ JS.unpack nn
                           jstr <- nodeValue textNode
-                          putStrLn $ JS.unpack jstr
+                          putStrLn $ "nodeValue = " ++ JS.unpack jstr
                           case model ^. documentRange of
                             Nothing -> pure ()
                             (Just (b,e))
@@ -1065,15 +1099,22 @@ startSelection sendWS e model'' =
             (Just lines) <- getFirstChild editorNode
             mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
             case mSelNode of
-              Nothing -> print "error: could not find selected node"
+              Nothing -> print "error: startSelection: could not find selected node"
               (Just selNode) ->
                 do nt <- nodeType selNode
                    putStrLn $ nodeTypeString nt
                    nn <- nodeName selNode
                    putStrLn $ JS.unpack nn
-                   (Just textNode) <- getFirstChild selNode
-                   setStart range (toJSNode textNode) si
-                   setEnd range (toJSNode textNode) si
+                   selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                   putStrLn $ JS.unpack selNodeTxt
+                   mTextNode <- getFirstChild selNode
+                   case mTextNode of
+                     Nothing -> pure ()
+                     (Just textNode) ->
+                       do jstr <- nodeValue textNode
+                          putStrLn $ "nodeValue = " ++ JS.unpack jstr
+                          setStart range (toJSNode textNode) si
+                          setEnd range (toJSNode textNode) si
             addRange sel range
             handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
                                                       & documentRange .~ Just (i, i)
@@ -1122,7 +1163,7 @@ boldRange sendWS (b, e) model' =
      let flattened = flattenDocument (model ^. localDocument)
          sub = Vector.slice b (e - b) flattened
          atoms = zip (Vector.toList sub) [b..e]
-         newFontWeight = if allBold atoms then FW400 else FW700
+         newFontWeight = if allBold sub then FW400 else FW700
          newEdit = catMaybes (map (\(a, i) ->
                              case a of
                                (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  newFontWeight) char))
@@ -1139,10 +1180,10 @@ boldRange sendWS (b, e) model' =
          isBold :: Atom -> Bool
          isBold atom =
            case atom of
-             (RC (RichChar (Font fw _ _) _)) = fw == FW700
-             _ = True
+             (RC (RichChar (Common.Font fw _ _) _)) -> fw == FW700
+             _ -> True
          allBold :: Vector Atom -> Bool
-         allBold atoms = T.foldr (\atom b -> isBold atom && b) True atoms
+         allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
 
 
 extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
