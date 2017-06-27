@@ -70,6 +70,7 @@ import Data.UserId (UserId(..))
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Mutable as MVector
+import Debug.Trace (trace)
 import           GHCJS.Buffer               (toByteString, fromByteString, getArrayBuffer, createFromArrayBuffer)
 import qualified GHCJS.Buffer as Buffer
 import GHCJS.Foreign.Callback (OnBlocked(..), Callback, asyncCallback)
@@ -472,14 +473,18 @@ relativeClickPos model mx my =
     Nothing     -> Nothing
     (Just epos) -> Just (mx - (rectLeft epos), my - (rectTop epos))
 
+-- if Y is greater than any line, return the last line
 lineAtY :: VBox [HBox a] -> Double -> Maybe Int
 lineAtY vbox y = go (vbox ^. boxContent) y 0
   where
     go [] _ _ = Nothing
+--      | n > 0 = error $ "lineAtY: " ++ show n -- Just (n - 1) -- Nothing
+--      | otherwise = Nothing
     go (hbox:hboxes) y n =
       if y < hbox ^. boxHeight
       then Just n
-      else go hboxes (y - hbox ^. boxHeight) (succ n)
+      else let n' = go hboxes (y - hbox ^. boxHeight) (succ n)
+           in trace ("lineAtY " ++ show n') n'
 
 -- If we put Characters in boxes then we could perhaps generalize this
 --
@@ -515,7 +520,8 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
         LineBreak
-         -> go boxes x (i + 1)
+          | boxes == [] -> (succ i, 0)
+          | otherwise -> go boxes x (i + 1)
         Item
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
@@ -546,7 +552,7 @@ getAtomNode n a@(atom:atoms) parent childNum =
                        getAtomNode (n - (Text.length (snd txt))) ((atom & boxContent .~ (RT (RichText txts))):[]) parent (childNum + 1)
              LineBreak ->
                do putStrLn $ "LineBreak n = " ++ show n ++ " n' = " ++show n'
-                  getAtomNode 0 (atom:[]) parent (childNum + 1)
+                  getAtomNode 0 (atom:[]) parent (childNum )
              o -> error $ "getAtomNode does not handle" ++ show (atom ^. boxContent)
 
 {-
@@ -680,7 +686,7 @@ indexAtPos :: FontMetrics           -- ^ font metrics for characters in this doc
            -> Maybe (Int, Int)             -- ^ index of atom if a match was found
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
-   Nothing -> Nothing
+   Nothing -> error "indexAtPos: Nothing"
    (Just i) ->
      let (ix, subIx) = (indexAtX fm ((vbox ^. boxContent)!!i) x)
      in Just $ ((sumPrevious $ take i (vbox ^. boxContent)) + ix, subIx)
@@ -782,7 +788,7 @@ renderAtomBox box =
   case box ^. boxContent of
     (RT (RichText txts)) -> map renderText txts
     (Img img)            -> [[hsx|<img src=(img ^. imageUrl) />|]]
-    LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]]
+    LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]] -- FIXME: why do we explicitly render a LineBreak? Perhaps so we can have multiple empty lines between paragraphs? But isn't that handled by the line div? Perhaps the line div needs something in it or it is zero height?
     Item                 -> let (RichText txts) = bullet in map renderText txts
   where
     renderText :: (Font, Text) -> Html Model
@@ -1043,21 +1049,31 @@ updateSelection' sendWS e model'' =
                           nn <- nodeName selNode
                           putStrLn $ JS.unpack nn
                           selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                          putStrLn $ JS.unpack selNodeTxt
-                          (Just textNode) <- getFirstChild selNode
-                          nt <- nodeType textNode
-                          putStrLn $ nodeTypeString nt
-                          nn <- nodeName textNode
-                          putStrLn $ JS.unpack nn
-                          jstr <- nodeValue textNode
-                          putStrLn $ "nodeValue = " ++ JS.unpack jstr
-                          case model ^. documentRange of
-                            Nothing -> pure ()
-                            (Just (b,e))
-                              | i > b ->
-                                setEnd r (toJSNode textNode) si
-                              | i <= b ->
-                                setStart r (toJSNode textNode) si
+                          putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                          mTextNode <- getFirstChild selNode
+                          case mTextNode of
+                            Nothing -> do
+                              case model ^. documentRange of
+                                Nothing -> pure ()
+                                (Just (b,e))
+                                  | i > b ->
+                                    setEnd r (toJSNode selNode) 0
+                                  | i <= b ->
+                                    setStart r (toJSNode selNode) 0
+                            (Just textNode) -> do
+                              nt <- nodeType textNode
+                              putStrLn $ nodeTypeString nt
+                              nn <- nodeName textNode
+                              putStrLn $ JS.unpack nn
+                              jstr <- nodeValue textNode
+                              putStrLn $ "nodeValue = " ++ JS.unpack jstr
+                              case model ^. documentRange of
+                                Nothing -> pure ()
+                                (Just (b,e))
+                                  | i > b ->
+                                    setEnd r (toJSNode textNode) si
+                                  | i <= b ->
+                                    setStart r (toJSNode textNode) si
                           pure model'
 
 {-
@@ -1331,7 +1347,7 @@ app sendWS model =
                              , EL MouseMove (selectEditor sendWS MouseMove)
 --                             , EL Click (selectEditor sendWS Click)
 --                             , EL Click    (clickEditor sendWS)
-                             , EL Copy     editorCopy
+--                             , EL Copy     editorCopy
                              , OnCreate (\el _ -> focus el)
                              ] >
             <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
