@@ -495,13 +495,22 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          then (i, si)
          else indexAtX' cs (x - cWidth) (succ i, succ si)
     go :: [AtomBox] -> Double -> Int -> (Int, Int)
-    go [] x i = (i, 0)
+    go [] x i = error "(i,0)" -- (i, 0)
     go (box:boxes) x i =
       case box ^. boxContent of
-        (RT txt)
+        (RT txt')
          | x < (box ^. boxWidth) ->
-            indexAtX' (richTextToRichChars txt) x (i, 0)
-         | otherwise -> go boxes (x - box ^. boxWidth) (i + richTextLength txt)
+            case txt' of
+              (RichText (txt:[])) -> indexAtX' (richTextToRichChars (RichText (txt:[]))) x (i, 0)
+              _ -> error "indexAtX -> go -> multiple txts not handle correctly."
+         | boxes == [] ->
+                case txt' of
+                  (RichText ((_,txt):[])) ->
+                    let len = Text.length txt in
+                    (i + len , len)
+                  _ -> error "indexAtX 2 -> go -> multiple txts not handle correctly."
+
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + richTextLength txt')
         (Img img)
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
@@ -528,12 +537,17 @@ getAtomNode n a@(atom:atoms) parent childNum =
 -}
        | otherwise ->
            case atom ^. boxContent of
-             (RT (RichText (txt:txts))) ->
+             (RT (RichText (txt:txts))) -> do
+               putStrLn $ "getAtomNode: " ++ show (RichText (txt:txts))
                if Text.length (snd txt) >= n
                then getAtomNode 0 a parent childNum
 --               else getAtomNode 0 a parent childNum
                else do putStrLn $ "getAtomNode length txt = " ++ show (Text.length (snd txt)) ++ " , n = " ++ show n ++ " txt = " ++ show txt
                        getAtomNode (n - (Text.length (snd txt))) ((atom & boxContent .~ (RT (RichText txts))):[]) parent (childNum + 1)
+             LineBreak ->
+               do putStrLn $ "LineBreak n = " ++ show n ++ " n' = " ++show n'
+                  getAtomNode 0 (atom:[]) parent (childNum + 1)
+             o -> error $ "getAtomNode does not handle" ++ show (atom ^. boxContent)
 
 {-
            do putStrLn $ "getAtomNode childNum=" ++ show childNum
@@ -772,7 +786,7 @@ renderAtomBox box =
     Item                 -> let (RichText txts) = bullet in map renderText txts
   where
     renderText :: (Font, Text) -> Html Model
-    renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span>   |]
+    renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span> |]
     nbsp = Text.replace " " (Text.singleton '\160')
 
 -- | convert a horizontal list of 'AtomBom' to Html
@@ -1028,6 +1042,8 @@ updateSelection' sendWS e model'' =
                           putStrLn $ nodeTypeString nt
                           nn <- nodeName selNode
                           putStrLn $ JS.unpack nn
+                          selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                          putStrLn $ JS.unpack selNodeTxt
                           (Just textNode) <- getFirstChild selNode
                           nt <- nodeType textNode
                           putStrLn $ nodeTypeString nt
