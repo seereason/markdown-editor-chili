@@ -1023,6 +1023,11 @@ updateSelection' sendWS e model'' =
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
                         & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+                        & bolding   .~
+                           case model ^. documentRange of
+                             Nothing -> (model ^. bolding)
+                             (Just (b,e)) ->
+                               allBold (extractRange (b,e) (model ^. localDocument))
 
      case mIndex of
        (Just (i, si)) ->
@@ -1053,7 +1058,7 @@ updateSelection' sendWS e model'' =
                           mTextNode <- getFirstChild selNode
                           case mTextNode of
                             Nothing -> do
-                              case model ^. documentRange of
+                              case model' ^. documentRange of
                                 Nothing -> pure ()
                                 (Just (b,e))
                                   | i > b ->
@@ -1067,7 +1072,7 @@ updateSelection' sendWS e model'' =
                               putStrLn $ JS.unpack nn
                               jstr <- nodeValue textNode
                               putStrLn $ "nodeValue = " ++ JS.unpack jstr
-                              case model ^. documentRange of
+                              case model' ^. documentRange of
                                 Nothing -> pure ()
                                 (Just (b,e))
                                   | i > b ->
@@ -1192,8 +1197,9 @@ selectEditor sendWS mouseEV mouseEventObject withModel =
 boldRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
 boldRange sendWS (b, e) model' =
   do model <- sendPatch sendWS model'
-     let flattened = flattenDocument (model ^. localDocument)
-         sub = Vector.slice b (e - b) flattened
+     let -- flattened = flattenDocument (model ^. localDocument)
+         -- sub = Vector.slice b (e - b) flattened
+         sub = extractRange (b, e) (model ^. localDocument)
          atoms = zip (Vector.toList sub) [b..e]
          newFontWeight = if allBold sub then FW400 else FW700
          newEdit = catMaybes (map (\(a, i) ->
@@ -1201,22 +1207,22 @@ boldRange sendWS (b, e) model' =
                                (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  newFontWeight) char))
                                _ -> Nothing
                            ) atoms)
-     print flattened
+--     print flattened
      print sub
      print atoms
      print newEdit
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
-                                        , _caret       = succ (model ^. caret)
+                                        , _caret         = succ (model ^. caret)
+                                        , _bolding       = not (model ^. bolding)
                                         }
-       where
-         isBold :: Atom -> Bool
-         isBold atom =
-           case atom of
-             (RC (RichChar (Common.Font fw _ _) _)) -> fw == FW700
-             _ -> True
-         allBold :: Vector Atom -> Bool
-         allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
-
+allBold :: Vector Atom -> Bool
+allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
+  where
+    isBold :: Atom -> Bool
+    isBold atom =
+      case atom of
+        (RC (RichChar (Common.Font fw _ _) _)) -> fw == FW700
+        _ -> True
 
 extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
 extractRange (b, e) localDocument =
