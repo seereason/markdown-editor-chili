@@ -244,7 +244,8 @@ layoutBoxes maxWidth (currWidth, []) = []
 layoutBoxes maxWidth (currWidth, (box:boxes))
   -- handle case were the box starts with a linebreak
   | box ^. boxLineBreak =
-      [] : layoutBoxes maxWidth (0, (box & boxLineBreak .~ False):boxes)
+--      [] : layoutBoxes maxWidth (0, (box & boxLineBreak .~ False):boxes)
+    (layoutBoxes maxWidth (currWidth, (box & boxLineBreak .~ False):[]) ++ (layoutBoxes maxWidth (0, boxes)))
   | currWidth + (box ^. boxWidth) <= maxWidth =
       case layoutBoxes maxWidth ((currWidth + (box ^. boxWidth)), boxes) of
        [] -> [[box]] -- this is the last box
@@ -520,7 +521,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
         LineBreak
-          | boxes == [] -> (succ i, 0)
+          | boxes == [] -> (i, 0)
           | otherwise -> go boxes x (i + 1)
         Item
          | x < (box ^. boxWidth) -> (i, i)
@@ -1294,7 +1295,7 @@ app sendWS model =
   in
          ([hsx|
            <div>
-             <% if False
+             <% if True
                  then <div style="position: absolute; left: 800px; width: 800px;">
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
