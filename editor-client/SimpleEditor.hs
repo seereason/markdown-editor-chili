@@ -536,11 +536,12 @@ getAtomNode 0 _ {- (atom:atoms) -} parent childNum =
 getAtomNode n a@(atom:atoms) parent childNum =
   case atomLength (atom ^. boxContent) of
     n' | n > n' -> getAtomNode (n - n') atoms parent (childNum + (atomNumNodes atom))
-{-
+
        | n == n' ->
            do putStrLn "getAtomNode n == n'"
-              pure Nothing
--}
+              getAtomNode (n - n') atoms parent (childNum + (atomNumNodes atom))
+--              pure Nothing
+
        | otherwise ->
            case atom ^. boxContent of
              (RT (RichText (txt:txts))) -> do
@@ -593,7 +594,7 @@ vboxLength vbox =
 {-
 Return the node which contains the element at index n.
 
-
+The index refers to atom on the right
 -}
 getHBoxNode :: Int -> [HBox [AtomBox]] -> JSNode -> Word -> IO (Maybe JSNode)
 getHBoxNode n [] _ _ = error $ "getHBoxNode: looking for n="++show n ++ " but the document is now []"
@@ -680,6 +681,7 @@ allP p vbox =
 
 -- | calculate the index to Atom in the document which is the hit
 -- target of the provided (x,y) coordinates
+--
 indexAtPos :: FontMetrics           -- ^ font metrics for characters in this document
            -> VBox [HBox [AtomBox]] -- ^ current layout of the document
            -> (Double, Double)      -- ^ (x,y) coordinates relative to the top-left of the editor div
@@ -1143,10 +1145,12 @@ startSelection sendWS e model'' =
                    nn <- nodeName selNode
                    putStrLn $ JS.unpack nn
                    selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                   putStrLn $ JS.unpack selNodeTxt
+                   putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
                    mTextNode <- getFirstChild selNode
                    case mTextNode of
-                     Nothing -> pure ()
+                     Nothing ->
+                       do setStart range (toJSNode selNode) 0
+                          setEnd   range (toJSNode selNode) 0
                      (Just textNode) ->
                        do jstr <- nodeValue textNode
                           putStrLn $ "nodeValue = " ++ JS.unpack jstr
