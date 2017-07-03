@@ -118,7 +118,7 @@ type FontMetrics = Map RichChar (Double, Double)
 -- We have a list of [(Font,Text)]. This allows us to do things like
 -- have the font style change in the middle of a word with out
 -- introducing the possibility that the layout engine will insert a
--- line-break in the middle of the world.
+-- line-break in the middle of the word.
 data RichText = RichText
   { _text :: [(Font, Text)]
   }

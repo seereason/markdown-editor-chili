@@ -56,7 +56,7 @@ import Data.JSString.Text (textToJSString, textFromJSString)
 import Data.List (findIndex, groupBy, nub, null, splitAt)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromJust, fromMaybe, maybe, catMaybes)
+import Data.Maybe (fromJust, fromMaybe, maybe, catMaybes, isNothing)
 import Data.Monoid ((<>))
 import Data.Patch (Patch, Edit(..), toList, fromList, applicable, apply, diff)
 import qualified Data.Patch as Patch
@@ -93,6 +93,12 @@ import Web.Editor.API
 -- import Web.ISO.HSX
 -- import Web.ISO.Types hiding (Context2D(Font))
 import System.IO.Unsafe (unsafePerformIO)
+
+debugStrLn :: String -> IO ()
+debugStrLn = putStrLn
+
+debugPrint :: (Show a) => a -> IO ()
+debugPrint = print
 
 safeApply :: (Eq a) => Patch a -> Vector a -> Vector a
 safeApply p v =
@@ -1014,12 +1020,16 @@ buttonUp sendWS e model'' =
      case mIndex of
        (Just i) -> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+{-
+The object that emits the MouseEvent is typically something like a
+span. But we want to be able to select subtext, so we need to know the
+offset into that span.
+-}
 
-updateSelection' :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
-updateSelection' sendWS e model'' =
+commonSelection :: (WebSocketReq -> IO ()) -> Bool -> MouseEventObject -> Model -> IO (Maybe Model)
+commonSelection sendWS newSelection e model'' =
   do model <- updateEditorPos model''
-     let elem = target e
-     targetRect <- getBoundingClientRect elem
+     targetRect <- getBoundingClientRect (target e)
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
          mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
@@ -1031,140 +1041,74 @@ updateSelection' sendWS e model'' =
                              Nothing -> (model ^. bolding)
                              (Just (b,e)) ->
                                allBold (extractRange (b,e) (model ^. localDocument))
-
      case mIndex of
-       (Just (i, si)) ->
-         do case model ^. currentRange of
-              Nothing -> pure Nothing
-              (Just r) ->
-                do putStrLn $ "update selection to index="++ show i ++ ", subindex=" ++ show si
-
-                   (Just doc) <- currentDocument
-                   (Just editorNode) <- getElementById  doc "editor-layout"
-                   print "editor-layout"
-                   nt <- nodeType editorNode
-                   putStrLn $ nodeTypeString nt
-                   nn <- nodeName editorNode
-                   putStrLn $ JS.unpack nn
-                   (Just lines) <- getFirstChild editorNode
-                   mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
-                   model'' <- case mSelNode of
-                     Nothing -> do print "error: updateSelection': could not find selected node"
-                                   pure model'
-                     (Just selNode) ->
-                       do nt <- nodeType selNode
-                          putStrLn $ nodeTypeString nt
-                          nn <- nodeName selNode
-                          putStrLn $ JS.unpack nn
-                          selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                          putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
-                          mTextNode <- getFirstChild selNode
-                          case mTextNode of
-                            Nothing -> do
-                              case model' ^. documentRange of
-                                Nothing -> pure ()
-                                (Just (b,e))
-                                  | i > b ->
-                                    setEnd r (toJSNode selNode) 0
-                                  | i <= b ->
-                                    setStart r (toJSNode selNode) 0
-                            (Just textNode) -> do
-                              nt <- nodeType textNode
-                              putStrLn $ nodeTypeString nt
-                              nn <- nodeName textNode
-                              putStrLn $ JS.unpack nn
-                              jstr <- nodeValue textNode
-                              putStrLn $ "nodeValue = " ++ JS.unpack jstr
-                              case model' ^. documentRange of
-                                Nothing -> pure ()
-                                (Just (b,e))
-                                  | i > b ->
-                                    setEnd r (toJSNode textNode) si
-                                  | i <= b ->
-                                    setStart r (toJSNode textNode) si
-                          pure model'
-
-{-
-                   nt <- nodeType elem
-                   putStrLn $ nodeTypeString nt
-                   nn <- nodeName elem
-                   putStrLn $ JS.unpack nn
-                   (Just textNode) <- getFirstChild elem
-                   nt <- nodeType textNode
-                   putStrLn $ nodeTypeString nt
-                   nn <- nodeName textNode
-                   putStrLn $ JS.unpack nn
-                   setEnd r (toJSNode elem) 0
--}
-                   handleAction sendWS (MoveCaret i) (model'' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
        Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
-
-{-
-The object that emits the MouseEvent is typically something like a
-span. But we want to be able to select subtext, so we need to know the
-offset into that span.
--}
-
-startSelection :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
-startSelection sendWS e model'' =
-  do model <- updateEditorPos model''
-     let elem = target e
-     targetRect <- getBoundingClientRect elem
-     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
-         model' = model & mousePos  ?~ (clientX e, clientY e)
-                        & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
-                        & targetPos .~ (Just targetRect)
-                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
-     case mIndex of
        (Just (i, si)) ->
-         do putStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
-            w     <- window
-            sel   <- getSelection w
-            range <- newRange
-            removeAllRanges sel
-{-
-            nt <- nodeType elem
-            putStrLn $ nodeTypeString nt
-            nn <- nodeName elem
-            putStrLn $ JS.unpack nn
--}
-            (Just doc) <- currentDocument
-            (Just editorNode) <- getElementById  doc "editor-layout"
-            print "editor-layout"
-            nt <- nodeType editorNode
-            putStrLn $ nodeTypeString nt
-            nn <- nodeName editorNode
-            putStrLn $ JS.unpack nn
-            (Just lines) <- getFirstChild editorNode
-            mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
-            case mSelNode of
-              Nothing -> print "error: startSelection: could not find selected node"
-              (Just selNode) ->
-                do nt <- nodeType selNode
-                   putStrLn $ nodeTypeString nt
-                   nn <- nodeName selNode
-                   putStrLn $ JS.unpack nn
-                   selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                   putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
-                   mTextNode <- getFirstChild selNode
-                   case mTextNode of
-                     Nothing ->
-                       do setStart range (toJSNode selNode) 0
-                          setEnd   range (toJSNode selNode) 0
-                     (Just textNode) ->
-                       do jstr <- nodeValue textNode
-                          putStrLn $ "nodeValue = " ++ JS.unpack jstr
-                          setStart range (toJSNode textNode) si
-                          setEnd range (toJSNode textNode) si
-            addRange sel range
-            handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
-                                                      & documentRange .~ Just (i, i)
-                                              )
+         do mRange <- if newSelection
+              then do debugStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
+                      w     <- window
+                      range <- newRange
+                      sel   <- getSelection w
+                      removeAllRanges sel
+                      addRange sel range
+                      pure (Just range)
+              else do debugStrLn $ "update selection to index="++ show i ++ ", subindex=" ++ show si
+                      pure $ model ^. currentRange
 
-       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
-
-
+            case mRange of
+              Nothing -> pure Nothing
+              (Just range) ->
+                   do (Just doc) <- currentDocument
+                      (Just editorNode) <- getElementById  doc "editor-layout"
+                      debugStrLn "editor-layout"
+                      nt <- nodeType editorNode
+                      putStrLn $ nodeTypeString nt
+                      nn <- nodeName editorNode
+                      putStrLn $ JS.unpack nn
+                      (Just lines) <- getFirstChild editorNode
+                      mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
+                      case mSelNode of
+                        Nothing -> do print "error: updateSelection': could not find selected node"
+                                      pure (Just model')
+                        (Just selNode) ->
+                          do nt <- nodeType selNode
+                             putStrLn $ nodeTypeString nt
+                             nn <- nodeName selNode
+                             putStrLn $ JS.unpack nn
+                             selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                             putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                             mTextNode <- getFirstChild selNode
+                             if newSelection
+                               then do case mTextNode of
+                                         Nothing ->
+                                           do setStart range (toJSNode selNode) 0
+                                              setEnd   range (toJSNode selNode) 0
+                                         (Just textNode) ->
+                                           do jstr <- nodeValue textNode
+                                              debugStrLn $ "nodeValue = " ++ JS.unpack jstr
+                                              setStart range (toJSNode textNode) si
+                                              setEnd range (toJSNode textNode) si
+                                       handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
+                                                                                 & documentRange .~ Just (i, i)
+                                                                         )
+                               else do case mTextNode of
+                                         Nothing -> do
+                                           case model' ^. documentRange of
+                                             Nothing -> pure ()
+                                             (Just (b,e))
+                                               | i > b ->
+                                                 setEnd range (toJSNode selNode) 0
+                                               | i <= b ->
+                                                 setStart range (toJSNode selNode) 0
+                                         (Just textNode) ->
+                                           case model' ^. documentRange of
+                                             Nothing -> pure ()
+                                             (Just (b,e))
+                                               | i > b ->
+                                                 setEnd range (toJSNode textNode) si
+                                               | i <= b ->
+                                                 setStart range (toJSNode textNode) si
+                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
 
 {-
 
@@ -1185,13 +1129,13 @@ selectEditor sendWS mouseEV mouseEventObject withModel =
          MouseNoop ->
            case mouseEV of
              MouseDown ->
-               do (Just m') <- startSelection sendWS mouseEventObject m
+               do (Just m') <- commonSelection sendWS True mouseEventObject m
                   pure $ Just $ m' & mouseActivity .~ (MouseDowned mouseEventObject)
              _ -> pure Nothing
          MouseDowned oldMEO ->
            case mouseEV of
              MouseMove ->
-               do (Just m') <- updateSelection' sendWS mouseEventObject m
+               do (Just m') <- commonSelection sendWS False mouseEventObject m
                   pure (Just m')
 
              MouseUp ->
