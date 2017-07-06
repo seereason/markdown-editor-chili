@@ -163,6 +163,7 @@ data MouseActivity
 data Model = Model
   { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
   , _bolding       :: Bool
+  , _italicizing   :: Bool
   , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
@@ -1041,6 +1042,12 @@ commonSelection sendWS newSelection e model'' =
                              Nothing -> (model ^. bolding)
                              (Just (b,e)) ->
                                allBold (extractRange (b,e) (model ^. localDocument))
+                        & italicizing   .~
+                           case model ^. documentRange of
+                             Nothing -> (model ^. bolding)
+                             (Just (b,e)) ->
+                               allItalics (extractRange (b,e) (model ^. localDocument))
+
      case mIndex of
        Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
        (Just (i, si)) ->
@@ -1163,6 +1170,7 @@ boldRange sendWS (b, e) model' =
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret         = succ (model ^. caret)
                                         , _bolding       = not (model ^. bolding)
+--                                        , _italicizing   = not (model ^. italicizing)
                                         }
 allBold :: Vector Atom -> Bool
 allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
@@ -1171,6 +1179,38 @@ allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
     isBold atom =
       case atom of
         (RC (RichChar (Common.Font fw _ _) _)) -> fw == FW700
+        _ -> True
+
+italicizeRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
+italicizeRange sendWS (b, e) model' =
+  do model <- sendPatch sendWS model'
+     let -- flattened = flattenDocument (model ^. localDocument)
+         -- sub = Vector.slice b (e - b) flattened
+         sub = extractRange (b, e) (model ^. localDocument)
+         atoms = zip (Vector.toList sub) [b..e]
+         newFontStyle = if allItalics sub then Normal else Italic
+         newEdit = catMaybes (map (\(a, i) ->
+                             case a of
+                               (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontStyle .~  newFontStyle) char))
+                               _ -> Nothing
+                           ) atoms)
+--     print flattened
+     print sub
+     print atoms
+     print newEdit
+     pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
+                                        , _caret         = succ (model ^. caret)
+--                                        , _bolding       = not (model ^. bolding)
+                                        , _italicizing   = not (model ^. italicizing)
+                                        }
+
+allItalics :: Vector Atom -> Bool
+allItalics atoms = F.foldr (\atom b -> isItalic atom && b) True atoms
+  where
+    isItalic :: Atom -> Bool
+    isItalic atom =
+      case atom of
+        (RC (RichChar (Common.Font _ _ fs) _)) -> fs == Italic
         _ -> True
 
 extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
@@ -1207,11 +1247,23 @@ boldChange sendWS ev withModel = withModel $ \model->
          do stopPropagation ev
             boldRange sendWS (b,e) model
 
+italicChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
+italicChange sendWS ev withModel = withModel $ \model->
+  do preventDefault ev
+     refocus model
+     case model ^. documentRange of
+       Nothing -> pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal)
+                                       & italicizing .~ (not (model ^. italicizing))
+                                       & debugMsg .~ Just "ItalicChange")
+       (Just (b,e)) ->
+         do stopPropagation ev
+            italicizeRange sendWS (b,e) model
+{-
 italicChange :: MouseEventObject -> WithModel Model -> IO ()
 italicChange e withModel =  withModel $ \model->
   do preventDefault e
      pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange")
-
+-}
 itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 itemize sendWS e withModel =  withModel $ \model->
   do preventDefault e
@@ -1288,7 +1340,7 @@ app sendWS model =
               <div class="btn-group" data-toggle="buttons">
                <label class=(if (model ^. bolding) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
-               <label class="btn btn-default" [ EL Click italicChange ] >
+               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
                <label class="btn btn-default" [ EL Click (itemize sendWS) ] >
                 <input type="checkbox" autocomplete="off" />•</label>
