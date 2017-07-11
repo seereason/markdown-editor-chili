@@ -490,9 +490,9 @@ lineAtY vbox y = go (vbox ^. boxContent) y 0
 --      | otherwise = Nothing
     go (hbox:hboxes) y n =
       if y < hbox ^. boxHeight
-      then Just n
-      else let n' = go hboxes (y - hbox ^. boxHeight) (succ n)
-           in trace ("lineAtY " ++ show n') n'
+      then trace ("lineAtY " ++ show n) (Just n)
+      else go hboxes (y - hbox ^. boxHeight) (succ n)
+
 
 -- If we put Characters in boxes then we could perhaps generalize this
 --
@@ -514,7 +514,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
         (RT txt')
          | x < (box ^. boxWidth) ->
             case txt' of
-              (RichText (txt:[])) -> indexAtX' (richTextToRichChars (RichText (txt:[]))) x (i, 0)
+              (RichText (txt:txts)) -> indexAtX' (richTextToRichChars (RichText (txt:txts))) x (i, 0)
               _ -> error "indexAtX -> go -> multiple txts not handle correctly."
          | boxes == [] ->
                 case txt' of
@@ -628,18 +628,21 @@ Since each hbox is a child of the parent, we increment the childNum by one.
 -}
 getHBoxNode n (hbox:hboxes) parent childNum =
   case hboxLength hbox of
-    n' | n > n' ->
+    n' | n >= n' ->
            do putStrLn $ "getHBoxNode n = " ++ show n ++ " n' = " ++ show n'
               getHBoxNode (n - n') hboxes parent (childNum + 1)
+{-
        | n == n' ->
-           do putStrLn "getHBoxNode n==n'"
+           do putStrLn "getHBoxNode n == n'"
               children <- childNodes parent
               mchild <- item children childNum
               case mchild of
                 Nothing      -> error $ "getHBoxNode: mchild is Nothing. Was looking for childNum =" ++ show childNum -- pure Nothing
                 (Just child) -> getAtomNode n (hbox ^. boxContent) child 0
+-}
        | otherwise ->
-           do children <- childNodes parent
+           do putStrLn $ "getHBoxNode n = " ++ show n ++ " n' = " ++ show n'
+              children <- childNodes parent
               mchild <- item children childNum
               case mchild of
                 Nothing      -> error $ "getHBoxNode: mchild is Nothing. Was looking for childNum =" ++ show childNum -- pure Nothing
@@ -857,19 +860,25 @@ indexToPosAtom :: Int
 indexToPosAtom index fm box =
   case box ^. boxContent of
     (RT rt)
-      | richTextLength rt < index -> Nothing
+      | index > richTextLength rt -> error $ "indexToPosAtom: " ++ show (index, richTextLength rt) -- Nothing
       | otherwise ->
-        Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
+          let w = Just $ foldr sumWidth 0 (take index (richTextToRichChars rt))
+          in trace (show w) w
     (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
     LineBreak -> Just 0 -- FIXME: do we have to account for the fact that we should be at a newline now?
     Item      -> Just (box ^. boxWidth)
   where
     sumWidth c acc =
       case Map.lookup c fm of
-        Just (w, _) -> acc + w
-        Nothing -> acc
+        Just (w, _) -> trace ("width = " ++ show w) $ acc + w
+        Nothing -> error $ "missing width for " ++ show c -- acc
 
 -- | given an index, calculate its (left, top, height) coordinates in the editor
+--
+-- NOTES:
+--
+-- It is a bit tricky to deal with the caret position that is at the very end of the document.
+-- Where the caret goes depends if the last atom is a LineBreak or not.
 --
 indexToPos :: Int
            -> Model
@@ -877,28 +886,30 @@ indexToPos :: Int
 indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: maybe shouldn't hardcode to 16
   where
     -- go over the lines
-    go [] _ _  = Nothing
+    go [] _ curPos  = trace ("go [] = " ++ show curPos) $ Just curPos -- Nothing
     go (hbox:hboxes) i curPos =
       -- walk over the current line
       case go' (hbox ^. boxContent) (hbox ^. boxHeight) i curPos of
        -- if the position is in current line, we are done
-       (Right curPos') -> curPos'
+       (Right curPos') -> trace ("go = " ++ show curPos') curPos'
        -- otherwise add the height of that line and start
        -- looking in the next line
-       (Left (i', (x,y,height))) ->
-         go hboxes i' (0, y + hbox ^. boxHeight, height)
+       (Left (i', (x,y,height))) -- FIXME: deal with trailing newline versus no trailing newline
+         | hboxes == [] -> Just (x,y,height)
+         | otherwise -> go hboxes i' (0, y {- + hbox ^. boxHeight-}, height)
 
     -- go over the atoms in a line
---     go' :: [AtomBox] -> Int -> Double -> Either (Int, Double) (Maybe Double)
-    go' [] _ i curPos = Left (i, curPos)
-    go' _ _ 0 curPos = Right (Just curPos)
+    go' :: [AtomBox] -> Double -> Int -> (Double, Double, Double) -> Either (Int, (Double, Double, Double)) (Maybe (Double, Double, Double))
+    go' [] _ i curPos = trace ("go' [] =" ++ show (i, curPos)) (Left (i, curPos))
+    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak") $ (Left (i, (0, y + lineHeight, height)))
+    go' _ _ 0 curPos = trace ("go' 0 = " ++ show (0, curPos)) (Right (Just curPos))
     go' (box:boxes) lineHeight i (x,y,height) =
       -- if the index is greater than the length of the next atom
-      if i > atomLength (box ^. boxContent)
+      if i >= atomLength (box ^. boxContent)
          -- subtract length of next atom, add width, update height, check next atom
          then go' boxes lineHeight (i - atomLength (box ^. boxContent)) (x + box ^. boxWidth, y, box ^. boxHeight)
          -- if we found the atom we are looking for, look for x position within the atom
-         else case indexToPosAtom i (model ^. fontMetrics) box of
+         else trace "go' -> indexToPosAtom" $ case indexToPosAtom i (model ^. fontMetrics) box of
                Nothing   -> Right Nothing
                (Just x') ->
                  let boxForHeight = box
@@ -1300,6 +1311,8 @@ app sendWS model =
 --                             <p>Patches:  <% show (model  ^. patches) %></p>
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
+                             <p>indexToPos: <% show (indexToPos (model ^. caret) model) %> </p>
+                             <p>caretPos: <% show $ caretPos model (indexToPos (model ^. caret) model) %></p>
                              <p>mousePos: <% show (model ^. mousePos) %></p>
                              <p>editorPos: <% let mpos = model ^. editorPos in
                                               case mpos of
@@ -1310,7 +1323,7 @@ app sendWS model =
                                      Nothing -> "(,)"
                                      (Just epos) ->
                                        case model ^. mousePos of
-                                         Nothing -> "(,)"
+                                         Nothing -> "mousePos - editorPos(,)"
                                          (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
                              <p>targetPos: <% let mpos = model ^. targetPos in
                                               case mpos of
