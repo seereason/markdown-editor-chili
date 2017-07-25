@@ -485,7 +485,9 @@ relativeClickPos model mx my =
 lineAtY :: VBox [HBox a] -> Double -> Maybe Int
 lineAtY vbox y = go (vbox ^. boxContent) y 0
   where
-    go [] _ _ = Nothing
+    go [] _ n
+      | n > 0 = Just (pred n)
+      | otherwise = Nothing
 --      | n > 0 = error $ "lineAtY: " ++ show n -- Just (n - 1) -- Nothing
 --      | otherwise = Nothing
     go (hbox:hboxes) y n =
