@@ -699,7 +699,7 @@ indexAtPos :: FontMetrics           -- ^ font metrics for characters in this doc
            -> Maybe (Int, Int)             -- ^ index of atom if a match was found
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
-   Nothing -> error "indexAtPos: Nothing"
+   Nothing -> Nothing -- error "indexAtPos: Nothing"
    (Just i) ->
      let (ix, subIx) = (indexAtX fm ((vbox ^. boxContent)!!i) x)
      in Just $ ((sumPrevious $ take i (vbox ^. boxContent)) + ix, subIx)
@@ -901,8 +901,10 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: may
     -- go over the atoms in a line
     go' :: [AtomBox] -> Double -> Int -> (Double, Double, Double) -> Either (Int, (Double, Double, Double)) (Maybe (Double, Double, Double))
     go' [] _ i curPos = trace ("go' [] =" ++ show (i, curPos)) (Left (i, curPos))
-    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak") $ (Left (i, (0, y + lineHeight, height)))
-    go' _ _ 0 curPos = trace ("go' 0 = " ++ show (0, curPos)) (Right (Just curPos))
+    go' _  _ 0 curPos = trace ("go' 0 = " ++ show (0, curPos)) (Right (Just curPos))
+    -- if the last item in a line is a LineBreak
+    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
+
     go' (box:boxes) lineHeight i (x,y,height) =
       -- if the index is greater than the length of the next atom
       if i >= atomLength (box ^. boxContent)
@@ -1013,7 +1015,7 @@ clickEditor sendWS e withModel = withModel $ \model'' ->
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
-                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+--                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
      case mIndex of
        (Just i) -> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
@@ -1028,7 +1030,7 @@ buttonUp sendWS e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
-                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+--                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
      case mIndex of
        (Just i) -> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
@@ -1047,7 +1049,7 @@ commonSelection sendWS newSelection e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
-                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+--                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
                         & bolding   .~
                            case model ^. documentRange of
                              Nothing -> (model ^. bolding)
@@ -1307,28 +1309,29 @@ app sendWS model =
                              <h1>Debug</h1>
                              <p>userId: <% show (model ^. userId) %></p>
                              <p>debugMsg: <% show (model ^. debugMsg) %></p>
-                             <p>LocalDocument: <% show (model ^. localDocument) %></p>
+--                             <p>LocalDocument: <% show (model ^. localDocument) %></p>
 --                             <p>Patches:  <% show (model  ^. patches) %></p>
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
-                             <p>indexToPos: <% show (indexToPos (model ^. caret) model) %> </p>
+                             <p>indexToPos (x,y,h): <% show (indexToPos (model ^. caret) model) %> </p>
                              <p>caretPos: <% show $ caretPos model (indexToPos (model ^. caret) model) %></p>
                              <p>mousePos: <% show (model ^. mousePos) %></p>
                              <p>editorPos: <% let mpos = model ^. editorPos in
                                               case mpos of
                                                  Nothing -> "(,)"
                                                  (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p><% let mepos = model ^. editorPos in
+                             <p>mousePos - editorPos: <% let mepos = model ^. editorPos in
                                    case mepos of
                                      Nothing -> "(,)"
                                      (Just epos) ->
                                        case model ^. mousePos of
-                                         Nothing -> "mousePos - editorPos(,)"
+                                         Nothing -> "(,)"
                                          (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
                              <p>targetPos: <% let mpos = model ^. targetPos in
                                               case mpos of
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
                                 <% case model ^. selectionData of
                                      Nothing -> <p>No Selection</p>
@@ -1342,7 +1345,7 @@ app sendWS model =
                              <p>Selection: documentRange=<% show $ model ^. documentRange %></p>
 
                              <p>Current Font <% show (model ^. currentFont) %></p>
-                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+--                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
 
 
                       </div>
