@@ -180,6 +180,7 @@ data Model = Model
   , _selectionData :: Maybe SelectionData
   , _currentRange  :: Maybe Range
   , _documentRange :: Maybe (Int, Int)
+  , _rangeAnchor   :: Maybe (JSNode, Int) -- ^ where the selection is anchored -- could be at beginning or end depending on direction of mouse drag
   , _userId        :: UserId
   , _lastActivity  :: POSIXTime
   , _mouseActivity :: MouseActivity
@@ -374,6 +375,13 @@ handleAction sendWS editAction model =
          b = isNewPatchCondition (model ^. localDocument ^. inflightPatch) (model ^. editState) newEditState
          model''' = model & editState .~ newEditState
                           & lastActivity .~ now
+                          & bolding   .~
+                           case model ^. documentRange of
+                             Nothing -> (model ^. bolding)
+                             (Just (b,e))
+                               | b == e -> allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
+                               | otherwise -> allBold (extractRange (b,e) (model ^. localDocument))
+
      model'  <- if b then sendPatch sendWS model''' else pure model'''
      model'' <- applyEdit model' editAction
      pure (Just model'')
@@ -1006,7 +1014,7 @@ keyDowned sendWS e withModel = withModel $ \model'' ->
         | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
         | c == 40   -> pure Nothing -- model                                        -- down
         | otherwise -> pure Nothing -- model
-
+{-
 clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 clickEditor sendWS e withModel = withModel $ \model'' ->
   do model <- updateEditorPos model''
@@ -1021,7 +1029,7 @@ clickEditor sendWS e withModel = withModel $ \model'' ->
      case mIndex of
        (Just i) -> handleAction sendWS (MoveCaret i) model'
        Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
-
+-}
 buttonUp :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
 buttonUp sendWS e model'' =
   do model <- updateEditorPos model''
@@ -1032,6 +1040,9 @@ buttonUp sendWS e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
+                        & documentRange .~ case model ^. documentRange of
+                                             (Just (b,e)) | b == e -> Nothing
+                                             dr -> dr
 --                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
      case mIndex of
        (Just i) -> handleAction sendWS (MoveCaret i) model'
@@ -1051,18 +1062,19 @@ commonSelection sendWS newSelection e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
---                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
+{- Not sure why this is here. Seems like the documentRange will not have been updated yet?
                         & bolding   .~
                            case model ^. documentRange of
                              Nothing -> (model ^. bolding)
-                             (Just (b,e)) ->
-                               allBold (extractRange (b,e) (model ^. localDocument))
+                             (Just (b,e))
+                               | b == e -> allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
+                               | otherwise -> allBold (extractRange (b,e) (model ^. localDocument))
                         & italicizing   .~
                            case model ^. documentRange of
-                             Nothing -> (model ^. bolding)
+                             Nothing -> (model ^. italicizing)
                              (Just (b,e)) ->
                                allItalics (extractRange (b,e) (model ^. localDocument))
-
+-}
      case mIndex of
        Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
        (Just (i, si)) ->
@@ -1101,36 +1113,54 @@ commonSelection sendWS newSelection e model'' =
                              putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
                              mTextNode <- getFirstChild selNode
                              if newSelection
-                               then do case mTextNode of
-                                         Nothing ->
-                                           do setStart range (toJSNode selNode) 0
-                                              setEnd   range (toJSNode selNode) 0
-                                         (Just textNode) ->
-                                           do jstr <- nodeValue textNode
-                                              debugStrLn $ "nodeValue = " ++ JS.unpack jstr
-                                              setStart range (toJSNode textNode) si
-                                              setEnd range (toJSNode textNode) si
+                               then do (node, off) <-
+                                             case mTextNode of
+                                               Nothing ->
+                                                 do setStart range (toJSNode selNode) 0
+                                                    setEnd   range (toJSNode selNode) 0
+                                                    pure (toJSNode selNode, 0)
+                                               (Just textNode) ->
+                                                 do jstr <- nodeValue textNode
+                                                    debugStrLn $ "nodeValue = " ++ JS.unpack jstr
+                                                    setStart range (toJSNode textNode) si
+                                                    setEnd range (toJSNode textNode) si
+                                                    pure (toJSNode textNode, si)
                                        handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
                                                                                  & documentRange .~ Just (i, i)
+                                                                                 & rangeAnchor .~ Just (node, off)
                                                                          )
-                               else do case mTextNode of
+                               else do let Just (node, off) = model' ^. rangeAnchor
+                                       case mTextNode of
                                          Nothing -> do
                                            case model' ^. documentRange of
                                              Nothing -> pure ()
                                              (Just (b,e))
                                                | i > b ->
-                                                 setEnd range (toJSNode selNode) 0
+                                                   do setStart range node off
+                                                      setEnd range (toJSNode selNode) 0
                                                | i <= b ->
-                                                 setStart range (toJSNode selNode) 0
+                                                   do setStart range (toJSNode selNode) 0
+                                                      setEnd range node off
                                          (Just textNode) ->
                                            case model' ^. documentRange of
                                              Nothing -> pure ()
                                              (Just (b,e))
                                                | i > b ->
-                                                 setEnd range (toJSNode textNode) si
+                                                 do setStart range node off
+                                                    setEnd range (toJSNode textNode) si
+{-
+                                               | i == b ->
+                                                 do setStart range (toJSNode textNode) si
+                                                    setEnd range (toJSNode textNode) si
+-}
                                                | i <= b ->
-                                                 setStart range (toJSNode textNode) si
-                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
+                                                   do setStart range (toJSNode textNode) si
+                                                      setEnd range node off
+
+                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> (b,i)) dr)) -- (min b i, max e i)) dr))
+--                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> if i > b then (b, i) else (i, e)) dr)) -- (min b i, max e i)) dr))
+                                       -- why do I want min/max here? It makes it so that you can make the selection bigger, but never smaller
+--                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
 
 {-
 
@@ -1229,9 +1259,10 @@ allItalics atoms = F.foldr (\atom b -> isItalic atom && b) True atoms
         _ -> True
 
 extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
-extractRange (b, e) localDocument =
-  let flattened = flattenDocument localDocument
-  in Vector.slice b (e - b) flattened
+extractRange (b', e') localDocument =
+  let (b, e) = (min b' e', max b' e')
+      flattened = flattenDocument localDocument
+  in Vector.slice b (min (Vector.length flattened) (e - b)) flattened
 
 
 {-
@@ -1292,14 +1323,14 @@ editorCopy e withModel =  withModel $ \model->
      dt <- clipboardData e
      setDataTransferData dt "text/plain" "boo-yeah"
      pure $ Just $ model & debugMsg .~ Just "copy"
-
+{-
 updateSelection :: SelectionEventObject -> WithModel Model -> IO ()
 updateSelection e withModel =
   withModel $ \model -> do
 --    js_alert "updateSelection"
     sel <- getSelectionData model
     pure $ Just $ model & selectionData .~ sel
-
+-}
 app :: (WebSocketReq -> IO ()) -> Model -> Html Model
 app sendWS model =
   let setFontSize s = EL Click (\e withModel -> withModel $ \m -> pure $ Just $ m & (currentFont . fontSize) .~ s)
@@ -1315,6 +1346,18 @@ app sendWS model =
 --                             <p>Patches:  <% show (model  ^. patches) %></p>
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
+                             <p>documentRange: <% show $ model ^. documentRange %></p>
+{-
+                             <% case model ^. selectionData of
+                                     Nothing -> <p>No Selection</p>
+                                     (Just selectionData) ->
+                                       <div>
+                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
+                                        <p>Selection: string len=<% show $ length $ selectionData ^. selectionString %></p>
+                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
+                                       </div>
+                             %>
+-}
                              <p>indexToPos (x,y,h): <% show (indexToPos (model ^. caret) model) %> </p>
                              <p>caretPos: <% show $ caretPos model (indexToPos (model ^. caret) model) %></p>
                              <p>mousePos: <% show (model ^. mousePos) %></p>
@@ -1333,23 +1376,10 @@ app sendWS model =
                                               case mpos of
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-                                <% case model ^. selectionData of
-                                     Nothing -> <p>No Selection</p>
-                                     (Just selectionData) ->
-                                       <div>
-                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
-                                        <p>Selection: string len=<% show $ length $ selectionData ^. selectionString %></p>
-                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
-                                       </div>
-                                %>
-                             <p>Selection: documentRange=<% show $ model ^. documentRange %></p>
-
                              <p>Current Font <% show (model ^. currentFont) %></p>
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
-
-
+                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>
             <h1>Super Awesome Editor</h1>
@@ -1358,7 +1388,8 @@ app sendWS model =
               <div class="btn-group" data-toggle="buttons">
                <label class=(if (model ^. bolding) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
-               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
+               <label class=(if (model ^. italicizing) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (italicChange sendWS) ] >
+--               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
                <label class="btn btn-default" [ EL Click (itemize sendWS) ] >
                 <input type="checkbox" autocomplete="off" />•</label>
@@ -1400,6 +1431,7 @@ initModel = Model
       , _pendingEdit = []
       }
   , _bolding       = False
+  , _italicizing   = False
   , _itemizing     = False
   , _connectionId  = Nothing
   , _editState     = Inserting
