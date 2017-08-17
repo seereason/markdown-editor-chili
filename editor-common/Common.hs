@@ -170,6 +170,7 @@ data Atom
   | Conflict Atom Atom
   | LineBreak
   | Item
+  | EOF
     deriving (Eq, Ord, Show, Read, Data, Typeable)
 deriveJSON defaultOptions ''Atom
 
@@ -191,6 +192,7 @@ atomLength (Img {})       = 1
 atomLength LineBreak = 1 -- FIXME: or is it zero?
 atomLength Item = 1 -- or is it zero?
 atomLength (Conflict atom1 atom2) = atomLength atom1 + atomLength atom2
+atomLength EOF = 1
 
 type AtomBox  = Box Singleton Atom
 

@@ -176,7 +176,7 @@ data Model = Model
   , _editorPos     :: Maybe DOMClientRect
   , _targetPos     :: Maybe DOMClientRect
   , _layout        :: VBox [HBox [AtomBox]]
-  , _maxWidth      :: Double
+  , _maxWidth      :: Double -- ^ in pixels
   , _selectionData :: Maybe SelectionData
   , _currentRange  :: Maybe Range
   , _documentRange :: Maybe (Int, Int)
@@ -331,10 +331,11 @@ backspaceChar model
 
 
 moveCaret :: Int -> Model -> Model
-moveCaret i model =
-         updateLayout $ model { _index = i
-                              , _caret = i
-                              }
+moveCaret i' model =
+  let i = min (max i' 0) (Vector.length (flattenDocument (model ^. localDocument)))
+  in updateLayout $ model { _index = i
+                          , _caret = i
+                          }
 
 {- We only have one patch inflight at time.
 
@@ -379,7 +380,14 @@ handleAction sendWS editAction model =
                            case model ^. documentRange of
                              Nothing -> (model ^. bolding)
                              (Just (b,e))
-                               | b == e -> allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
+                               | b == e && b == 0 && Vector.length (flattenDocument (model ^. localDocument)) == 0 -> False
+                               | b == e && b == 0 -> allBold (extractRange (0, 1) (model ^. localDocument))
+                               | b == e -> allBold (extractRange (pred b, b) (model ^. localDocument))
+{-
+                                   if b < Vector.length (flattenDocument (model ^. localDocument))
+                                   then allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
+                                   else False
+-}
                                | otherwise -> allBold (extractRange (b,e) (model ^. localDocument))
 
      model'  <- if b then sendPatch sendWS model''' else pure model'''
@@ -543,6 +551,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
         Item
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
+        EOF -> (i,i) -- fixme?
 
 
 getAtomNode :: Int -> [AtomBox] -> JSNode -> Word -> IO (Maybe JSNode)
@@ -572,6 +581,8 @@ getAtomNode n a@(atom:atoms) parent childNum =
              LineBreak ->
                do putStrLn $ "LineBreak n = " ++ show n ++ " n' = " ++show n'
                   getAtomNode 0 (atom:[]) parent (childNum )
+             EOF ->
+               do getAtomNode 0 (atom:[]) parent childNum
              o -> error $ "getAtomNode does not handle" ++ show (atom ^. boxContent)
 
 {-
@@ -615,10 +626,12 @@ Return the node which contains the element at index n.
 The index refers to atom on the right
 -}
 getHBoxNode :: Int -> [HBox [AtomBox]] -> JSNode -> Word -> IO (Maybe JSNode)
-getHBoxNode n [] _ _ = error $ "getHBoxNode: looking for n="++show n ++ " but the document is now []"
+
 {-
 Here we want the 0th element. So we just get the childNum of the parent.
 -}
+getHBoxNode n [] _ _ = pure Nothing -- error $ "getHBoxNode: looking for n="++show n ++ " but the document is now []"
+-- getHBoxNode 1 (hbox:[]) parent childNum 
 getHBoxNode 0 (hbox:hboxes) parent childNum =
   do children <- childNodes parent
      mchild <- item children childNum
@@ -813,6 +826,7 @@ renderAtomBox box =
     (Img img)            -> [[hsx|<img src=(img ^. imageUrl) />|]]
     LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]] -- FIXME: why do we explicitly render a LineBreak? Perhaps so we can have multiple empty lines between paragraphs? But isn't that handled by the line div? Perhaps the line div needs something in it or it is zero height?
     Item                 -> let (RichText txts) = bullet in map renderText txts
+    EOF                  -> [[hsx|<span class="eof"></span> |]]
   where
     renderText :: (Font, Text) -> Html Model
     renderText (font, txt) = [hsx| <span style=(fontToStyle font)><% nbsp txt %></span> |]
@@ -845,6 +859,7 @@ renderLayout lines =
 --        <% textToHtml fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
+     <span id="editor-end"></span>
     </div>
   |]
 {-
@@ -877,6 +892,7 @@ indexToPosAtom index fm box =
     (Img img) -> Just (img ^. imageWidth) -- box ^. boxWidth
     LineBreak -> Just 0 -- FIXME: do we have to account for the fact that we should be at a newline now?
     Item      -> Just (box ^. boxWidth)
+    EOF        -> Just 0 -- FIXME?
   where
     sumWidth c acc =
       case Map.lookup c fm of
@@ -1055,8 +1071,11 @@ offset into that span.
 
 commonSelection :: (WebSocketReq -> IO ()) -> Bool -> MouseEventObject -> Model -> IO (Maybe Model)
 commonSelection sendWS newSelection e model'' =
-  do model <- updateEditorPos model''
+  do -- first update our record of the position of the editor on the screen
+     model <- updateEditorPos model''
+     -- then get the bounding rectangle of whatever was clicked
      targetRect <- getBoundingClientRect (target e)
+
      let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
          mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
          model' = model & mousePos  ?~ (clientX e, clientY e)
@@ -1099,20 +1118,24 @@ commonSelection sendWS newSelection e model'' =
                       putStrLn $ nodeTypeString nt
                       nn <- nodeName editorNode
                       putStrLn $ JS.unpack nn
-                      (Just lines) <- getFirstChild editorNode
-                      mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) (toJSNode lines) 0
-                      case mSelNode of
-                        Nothing -> do print "error: updateSelection': could not find selected node"
-                                      pure (Just model')
-                        (Just selNode) ->
-                          do nt <- nodeType selNode
-                             putStrLn $ nodeTypeString nt
-                             nn <- nodeName selNode
-                             putStrLn $ JS.unpack nn
-                             selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                             putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
-                             mTextNode <- getFirstChild selNode
-                             if newSelection
+                      (Just lines) <- fmap toJSNode <$> getFirstChild editorNode
+                      mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) lines 0
+                      selNode <-
+                        case mSelNode of
+                          -- assumption is that the selection was past the end of the document
+                          Nothing -> do debugPrint "commonSelection: apparent selection beyond end of document"
+                                        (Just editorEndNode) <- getElementById  doc "editor-end"
+                                        pure (toJSNode editorEndNode)
+--                                        pure (Just model')
+                          (Just selNode) -> pure selNode
+                      nt <- nodeType selNode
+                      putStrLn $ nodeTypeString nt
+                      nn <- nodeName selNode
+                      putStrLn $ JS.unpack nn
+                      selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                      putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                      mTextNode <- getFirstChild selNode
+                      if newSelection
                                then do (node, off) <-
                                              case mTextNode of
                                                Nothing ->
@@ -1193,6 +1216,7 @@ selectEditor sendWS mouseEV mouseEventObject withModel =
              MouseUp ->
                do (Just m') <- buttonUp sendWS mouseEventObject m
                   pure $ Just $ m' & mouseActivity .~ MouseNoop
+             _ -> pure Nothing
 
 -- what if already bold? or a mix of bold and not bold?
 boldRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
@@ -1260,9 +1284,9 @@ allItalics atoms = F.foldr (\atom b -> isItalic atom && b) True atoms
 
 extractRange :: (Int, Int) -> LocalDocument -> Vector Atom
 extractRange (b', e') localDocument =
-  let (b, e) = (min b' e', max b' e')
-      flattened = flattenDocument localDocument
-  in Vector.slice b (min (Vector.length flattened) (e - b)) flattened
+  let flattened = flattenDocument localDocument
+      (b, e) = (min b' e', max b' e')
+  in Vector.slice b (e - b) flattened
 
 
 {-
@@ -1444,7 +1468,7 @@ initModel = Model
   , _editorPos     = Nothing
   , _targetPos     = Nothing
   , _layout        = Box 0 0 False []
-  , _maxWidth      = 300
+  , _maxWidth      = 200
   , _selectionData = Nothing
   , _currentRange  = Nothing
   , _documentRange = Nothing
@@ -1482,6 +1506,7 @@ resInit withModel conn initDoc = withModel $ \model ->
   do let toRCs :: Atom -> [RichChar]
          toRCs (Img {})      = []
          toRCs (LineBreak)   = []
+         toRCs EOF           = []
          toRCs Item          = richTextToRichChars bullet
          toRCs (RC rc) = [rc]
          toRCs (RT rt) = richTextToRichChars rt
@@ -1513,6 +1538,7 @@ resAppendPatch sendWS withModel connId (patchId, newPatch) =
               do let toRCs :: Atom -> [RichChar]
                      toRCs (Img {})      = []
                      toRCs (LineBreak)   = []
+                     toRCs EOF           = []
                      toRCs (RC rc) = [rc]
                      toRCs (RT rt) = richTextToRichChars rt
                      toRCs' :: Edit Atom -> [RichChar]
