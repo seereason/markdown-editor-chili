@@ -205,10 +205,10 @@ calcSizes lines =
 --    mkVBox [] = Box 0 0 []
 --    mkHBox [] = Box 0 0 []
     mkHBox boxes =
-      Box { _boxWidth   = sum (map _boxWidth boxes)
-          , _boxHeight  = maximum (map _boxHeight boxes)
+      Box { _boxWidth     = sum (map _boxWidth boxes)
+          , _boxHeight    = maximum (map _boxHeight boxes)
           , _boxLineBreak = True
-          , _boxContent = boxes
+          , _boxContent   = boxes
           }
 
 -- | convert a 'Text' to a 'Box'.
@@ -309,7 +309,7 @@ insertChar :: Atom
            -> Model
            -> Model
 insertChar atom model =
-  let newEdit =  (model ^. localDocument ^. pendingEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
+  let newEdit = (model ^. localDocument ^. pendingEdit) ++ [Insert (model ^. index) atom] -- (if c == '\r' then RichChar '\n' else RichChar c)]
   in
      updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                           , _caret       = succ (model ^. caret)
@@ -319,7 +319,7 @@ backspaceChar :: Model -> Model
 backspaceChar model
  | (model ^. index) > 0 = -- FIXME: how do we prevent over deletion?
   let index'  = pred (model ^. index)
-      c       = (flattenDocument $ model ^. localDocument) ! index'
+      c       = (flattenDocument $ model ^. localDocument) ! index' -- FIXME: probably does not handle RichText correctly
       newEdit = (model ^. localDocument ^. pendingEdit) ++ [Delete index' c]
   in
      updateLayout $
@@ -374,25 +374,38 @@ handleAction sendWS editAction model =
   do now <- getPOSIXTime
      let newEditState = toEditState editAction
          b = isNewPatchCondition (model ^. localDocument ^. inflightPatch) (model ^. editState) newEditState
-         model''' = model & editState .~ newEditState
+         model''' = model & editState    .~ newEditState
                           & lastActivity .~ now
-                          & bolding   .~
-                           case model ^. documentRange of
-                             Nothing -> (model ^. bolding)
-                             (Just (b,e))
-                               | b == e && b == 0 && Vector.length (flattenDocument (model ^. localDocument)) == 0 -> False
-                               | b == e && b == 0 -> allBold (extractRange (0, 1) (model ^. localDocument))
-                               | b == e -> allBold (extractRange (pred b, b) (model ^. localDocument))
-{-
-                                   if b < Vector.length (flattenDocument (model ^. localDocument))
-                                   then allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
-                                   else False
--}
-                               | otherwise -> allBold (extractRange (b,e) (model ^. localDocument))
-
      model'  <- if b then sendPatch sendWS model''' else pure model'''
      model'' <- applyEdit model' editAction
-     pure (Just model'')
+     pure (Just $ model'' & currentFont      .~
+                           case model ^. documentRange of
+                             Nothing ->
+                               case editAction of
+                                 (MoveCaret _) ->
+                                   case model'' ^. caret of
+                                     0 ->
+                                       case findFontRight (flattenDocument (model'' ^. localDocument)) 0 of
+                                       Nothing -> model'' ^. currentFont
+                                       (Just f) -> f
+                                     n -> case findFontLeft (flattenDocument (model'' ^. localDocument)) (pred n) of
+                                       Nothing -> model'' ^. currentFont
+                                       (Just f) -> f
+                                 _ -> model'' ^. currentFont
+              
+{-
+                                   case model'' ^. caret of
+                                     0 -> allBold (extractRange (0, 1) (model'' ^. localDocument))
+                                     n -> allBold (extractRange (pred n, n) (model'' ^. localDocument))
+                                 _ -> model'' ^. bolding
+-}
+                             (Just (b,e))
+                               | b == e && b == 0 && Vector.length (flattenDocument (model'' ^. localDocument)) == 0 -> setBold False (model'' ^. currentFont)
+                               | b == e && b == 0 -> setBold (allBold (extractRange (0, 1) (model'' ^. localDocument))) (model'' ^. currentFont)
+                               | b == e -> setBold (allBold (extractRange (pred b, b) (model'' ^. localDocument))) (model'' ^. currentFont)
+                               | otherwise -> setBold (allBold (extractRange (b,e) (model'' ^. localDocument))) (model'' ^. currentFont))
+
+
        where
          toEditState :: EditAction -> EditState
          toEditState (InsertAtom {}) = Inserting
@@ -1238,16 +1251,47 @@ boldRange sendWS (b, e) model' =
      print newEdit
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret         = succ (model ^. caret)
-                                        , _bolding       = not (model ^. bolding)
+--                                        , _bolding       = not (model ^. bolding)
 --                                        , _italicizing   = not (model ^. italicizing)
                                         }
+
+isBoldFont:: Font -> Bool
+isBoldFont (Common.Font fw _ _) = fw == FW700
+
+setBold :: Bool -> Font -> Font
+setBold False f = f & fontWeight .~ FW400
+setBold True  f = f & fontWeight .~ FW700
+
+{-
+fontAt :: Int -> Vector Atom -> Maybe Font
+fontAt 0 atoms =
+-}
+
+findFontLeft :: Vector Atom -> Int -> Maybe Font
+findFontLeft atoms 0 = Nothing
+findFontLeft atoms n =
+  case atoms ! n of
+    (RC (RichChar f _)) -> Just f
+    _ -> findFontLeft atoms (pred n)
+
+findFontRight :: Vector Atom -> Int -> Maybe Font
+findFontRight atoms n
+  | n < Vector.length atoms =
+    case atoms ! n of
+      (RC (RichChar f _)) -> Just f
+      _ -> findFontLeft atoms (succ n)
+  | otherwise = Nothing
+
+--     (RT rt) -> findFontLeft' richTextToRichChars rt
+
+
 allBold :: Vector Atom -> Bool
 allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
   where
     isBold :: Atom -> Bool
     isBold atom =
       case atom of
-        (RC (RichChar (Common.Font fw _ _) _)) -> fw == FW700
+        (RC (RichChar f _)) -> isBoldFont f
         _ -> True
 
 italicizeRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
@@ -1311,7 +1355,7 @@ boldChange sendWS ev withModel = withModel $ \model->
      refocus model
      case model ^. documentRange of
        Nothing -> pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400)
-                                       & bolding .~ (not (model ^. bolding))
+--                                       & bolding .~ (not (model ^. bolding))
                                        & debugMsg .~ Just "BoldChange")
        (Just (b,e)) ->
          do stopPropagation ev
@@ -1410,7 +1454,7 @@ app sendWS model =
             <div class="form-line editor-toolbar row">
             <div class="col-md-6">
               <div class="btn-group" data-toggle="buttons">
-               <label class=(if (model ^. bolding) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
+               <label class=(if (isBoldFont (model ^. currentFont)) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
                <label class=(if (model ^. italicizing) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (italicChange sendWS) ] >
 --               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
@@ -1516,12 +1560,30 @@ resInit withModel conn initDoc = withModel $ \model ->
          toRCs' (Delete _ _) = []
          toRCs' (Replace _ _ a) = toRCs a
      newFontMetrics <- calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList (initDoc ^. patches)))
-     pure (Just $ updateLayout $ model & connectionId .~ Just conn
+     pure (Just $ updateLayout $ let ld = (model ^. localDocument) & document .~ initDoc
+                                                                   & inflightPatch .~ Nothing
+                                                                   & forkedAt .~ (Seq.length (initDoc ^. patches) - 1)
+                                                                   & pendingEdit .~ []
+                                 in
+                                       model & connectionId .~ Just conn
                                        & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
+                                       & localDocument .~ ld
+                                       & currentFont .~ case findFontRight (flattenDocument ld) 0 of
+                                                         Nothing -> model ^. currentFont
+                                                         (Just f) -> f
+{-
                                        & (localDocument . document) .~ initDoc
                                        & (localDocument . inflightPatch) .~ Nothing
                                        & (localDocument . forkedAt) .~ (Seq.length (initDoc ^. patches) - 1)
-                                       & (localDocument . pendingEdit) .~ [])
+                                       & (localDocument . pendingEdit) .~ []
+-}
+{-
+                                       & bolding .~
+                                          if Vector.length (flattenDocument ld) >= 0
+                                          then allBold (extractRange (0, 1) ld)
+                                          else False
+-}
+          )
 
 resAppendPatch sendWS withModel connId (patchId, newPatch) =
   withModel $ \model ->
