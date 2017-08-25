@@ -162,7 +162,7 @@ data MouseActivity
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
-  , _bolding       :: Bool
+--   , _bolding       :: Bool
   , _italicizing   :: Bool
   , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
@@ -1352,26 +1352,27 @@ extractRange (b', e') localDocument =
 boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 boldChange sendWS ev withModel = withModel $ \model->
   do preventDefault ev
+     stopPropagation ev
      refocus model
      case model ^. documentRange of
-       Nothing -> pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400)
+       Nothing ->
+          do pure $ Just $ (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400)
 --                                       & bolding .~ (not (model ^. bolding))
                                        & debugMsg .~ Just "BoldChange")
        (Just (b,e)) ->
-         do stopPropagation ev
-            boldRange sendWS (b,e) model
+         do boldRange sendWS (b,e) model
 
 italicChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 italicChange sendWS ev withModel = withModel $ \model->
   do preventDefault ev
+     stopPropagation ev
      refocus model
      case model ^. documentRange of
        Nothing -> pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal)
                                        & italicizing .~ (not (model ^. italicizing))
                                        & debugMsg .~ Just "ItalicChange")
        (Just (b,e)) ->
-         do stopPropagation ev
-            italicizeRange sendWS (b,e) model
+         do italicizeRange sendWS (b,e) model
 {-
 italicChange :: MouseEventObject -> WithModel Model -> IO ()
 italicChange e withModel =  withModel $ \model->
@@ -1415,6 +1416,8 @@ app sendWS model =
                              <p>Index: <% show (model ^. index) %></p>
                              <p>Caret: <% show (model ^. caret) %></p>
                              <p>documentRange: <% show $ model ^. documentRange %></p>
+                             <p>current font: <% show $ model ^. currentFont %></p>
+                             <p>is bold <% show (isBoldFont $ model ^. currentFont) %></p>
 {-
                              <% case model ^. selectionData of
                                      Nothing -> <p>No Selection</p>
@@ -1445,7 +1448,6 @@ app sendWS model =
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-                             <p>Current Font <% show (model ^. currentFont) %></p>
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
                              <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
@@ -1454,8 +1456,9 @@ app sendWS model =
             <div class="form-line editor-toolbar row">
             <div class="col-md-6">
               <div class="btn-group" data-toggle="buttons">
-               <label class=(if (isBoldFont (model ^. currentFont)) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (boldChange sendWS) ] >
-                <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
+               <label class=(if (isBoldFont (model ^. currentFont)) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))
+                    [ EL Click (boldChange sendWS) ] >
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B <% show $ isBoldFont (model ^. currentFont) %> </label>
                <label class=(if (model ^. italicizing) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (italicChange sendWS) ] >
 --               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
@@ -1498,7 +1501,7 @@ initModel = Model
       , _pendingPatches = Seq.empty
       , _pendingEdit = []
       }
-  , _bolding       = False
+--  , _bolding       = False
   , _italicizing   = False
   , _itemizing     = False
   , _connectionId  = Nothing
