@@ -103,6 +103,20 @@ defaultFont =
        , _fontStyle  = Normal
        }
 
+isBoldFont:: Font -> Bool
+isBoldFont (Common.Font fw _ _) = fw == FW700
+
+isItalicFont:: Font -> Bool
+isItalicFont (Common.Font _ _ fs) = fs == Italic
+
+setBold :: Bool -> Font -> Font
+setBold False f = f & fontWeight .~ FW400
+setBold True  f = f & fontWeight .~ FW700
+
+setItalic :: Bool -> Font -> Font
+setItalic False f = f & fontStyle .~ Normal
+setItalic True  f = f & fontStyle .~ Italic
+
 data RichChar = RichChar
   { _font :: Font
   , _char :: Char

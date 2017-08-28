@@ -358,11 +358,13 @@ sendPatch sendWS model =
                do sendWS (WebSocketReq (ReqAddPatch (model' ^. localDocument ^. forkedAt) p))
                   pure $ model' & (localDocument . pendingPatches) .~ ps
                                 & (localDocument . inflightPatch) .~ Just p
+         (Just ifp) -> error "Handle inflight patch support in sendPatch"
   else pure model
 
 handleAction :: (WebSocketReq -> IO ()) -> EditAction -> Model -> IO (Maybe Model)
 handleAction sendWS editAction model =
-  do now <- getPOSIXTime
+  do debugStrLn $ "editAction = " ++ show editAction
+     now <- getPOSIXTime
      let newEditState = toEditState editAction
          b = isNewPatchCondition (model ^. localDocument ^. inflightPatch) (model ^. editState) newEditState
          model''' = model & editState    .~ newEditState
@@ -378,10 +380,10 @@ handleAction sendWS editAction model =
                                      0 ->
                                        case findFontRight (flattenDocument (model'' ^. localDocument)) 0 of
                                        Nothing -> model'' ^. currentFont
-                                       (Just f) -> f
+                                       (Just f) -> error "could not findFontRight" -- f
                                      n -> case findFontLeft (flattenDocument (model'' ^. localDocument)) (pred n) of
                                        Nothing -> model'' ^. currentFont
-                                       (Just f) -> f
+                                       (Just f) -> error "could not findFontLeft" -- f
                                  _ -> model'' ^. currentFont
                              (Just (b,e))
                                | b == e && b == 0 && Vector.length (flattenDocument (model'' ^. localDocument)) == 0 -> setBold False (model'' ^. currentFont)
@@ -1074,28 +1076,16 @@ boldRange sendWS (b, e) model' =
                                (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  newFontWeight) char))
                                _ -> Nothing
                            ) atoms)
+         chars = [ rc | (Replace _ _ (RC rc)) <- newEdit ]
+     fms <- calcMetrics (model ^. fontMetrics) chars
 --     print flattened
-     print sub
-     print atoms
-     print newEdit
+--     print sub
+--     print atoms
+--     print newEdit
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret         = succ (model ^. caret)
+                                        , _fontMetrics   = (model ^. fontMetrics) `mappend` fms
                                         }
-
-isBoldFont:: Font -> Bool
-isBoldFont (Common.Font fw _ _) = fw == FW700
-
-isItalicFont:: Font -> Bool
-isItalicFont (Common.Font fw _ _) = fw == FW700
-
-setBold :: Bool -> Font -> Font
-setBold False f = f & fontWeight .~ FW400
-setBold True  f = f & fontWeight .~ FW700
-
-{-
-fontAt :: Int -> Vector Atom -> Maybe Font
-fontAt 0 atoms =
--}
 
 findFontLeft :: Vector Atom -> Int -> Maybe Font
 findFontLeft atoms 0 = Nothing
@@ -1109,7 +1099,7 @@ findFontRight atoms n
   | n < Vector.length atoms =
     case atoms ! n of
       (RC (RichChar f _)) -> Just f
-      _ -> findFontLeft atoms (succ n)
+      _ -> findFontRight atoms (succ n)
   | otherwise = Nothing
 
 --     (RT rt) -> findFontLeft' richTextToRichChars rt
