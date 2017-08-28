@@ -83,15 +83,8 @@ import JavaScript.Web.MessageEvent (MessageEvent(..), MessageEventData(..))
 import qualified JavaScript.Web.MessageEvent as MessageEvent
 import qualified JavaScript.Web.WebSocket as WebSockets
 import JavaScript.Web.WebSocket (WebSocket, WebSocketRequest(..), connect, send)
-
--- import Servant.API ()
--- import Servant.Isomaniac (HasIsomaniac, MUV(..), ReqAction(..), isomaniac, muv, muvWS, runIdent)
--- import Servant.Common.BaseUrl
--- import Servant.Common.Req (Req(..))
 import Language.Haskell.HSX.QQ (hsx)
 import Web.Editor.API
--- import Web.ISO.HSX
--- import Web.ISO.Types hiding (Context2D(Font))
 import System.IO.Unsafe (unsafePerformIO)
 
 debugStrLn :: String -> IO ()
@@ -162,8 +155,6 @@ data MouseActivity
 -- could have a cache version of the Document with all the edits applied, then new edits would just mod that document
 data Model = Model
   { _localDocument :: LocalDocument -- Vector Atom -- ^ all of the patches applied but not the _currentEdit
---   , _bolding       :: Bool
-  , _italicizing   :: Bool
   , _itemizing     :: Bool
   , _connectionId  :: Maybe ConnectionId
   , _editState     :: EditState
@@ -392,13 +383,6 @@ handleAction sendWS editAction model =
                                        Nothing -> model'' ^. currentFont
                                        (Just f) -> f
                                  _ -> model'' ^. currentFont
-              
-{-
-                                   case model'' ^. caret of
-                                     0 -> allBold (extractRange (0, 1) (model'' ^. localDocument))
-                                     n -> allBold (extractRange (pred n, n) (model'' ^. localDocument))
-                                 _ -> model'' ^. bolding
--}
                              (Just (b,e))
                                | b == e && b == 0 && Vector.length (flattenDocument (model'' ^. localDocument)) == 0 -> setBold False (model'' ^. currentFont)
                                | b == e && b == 0 -> setBold (allBold (extractRange (0, 1) (model'' ^. localDocument))) (model'' ^. currentFont)
@@ -416,88 +400,13 @@ handleAction sendWS editAction model =
 --         isNewPatchCondition (Just _) _            _            = False -- a patch is already inflight, so we can just continue our pendingEdit
          isNewPatchCondition _  oldEditState newEditState = not (oldEditState == newEditState)
 
-
-                    {- case model ^. localDocument ^. inflightPatch of
-                             Nothing ->
-                               model { _localDocument = (model ^. localDocument) & inflightPatch .~ Just newPatch
-                                                                                 & pendingEdit   .~ []
-                                     , _index = model ^. caret
-                                     }
-                             (Just {}) ->
-                               model { _localDocument = (model ^. localDocument) & inflightPatch .~ Just newPatch
-                                                                                 & pendingEdit   .~ []
-                                     , _index = model ^. caret
-                                     }
-
-              sendWS (WebSocketReq (ReqAddPatch (model' ^. localDocument ^. forkedAt) newPatch))
--}
---              pure model'
-
          applyEdit :: Model -> EditAction -> IO Model
          applyEdit model editAction =
            case editAction of
              (InsertAtom c) -> pure $ insertChar c model
              DeleteAtom     -> pure $ backspaceChar model
              (MoveCaret i)  -> pure $ moveCaret i model
-{-
-handleAction :: (WebSocketReq -> IO ()) -> EditAction -> Model -> IO (Model, Maybe [WebSocketReq])
-handleAction sendWS ea model
-  | model ^. editState == Inserting =
-      case ea of
-       InsertAtom c -> pure $ insertChar c model
-       DeleteAtom ->
-         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
-             model'     = model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
-                                                                     & pendingEdit   .~ []
-                                , _editState   = Deleting
-                                , _index       = model ^. caret
-                                }
-         in do (model'', mwsq) <- handleAction sendWS DeleteAtom model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
-               pure (model'', Nothing)
-       MoveCaret {} ->
-         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
-             model'     =  model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
-                                                                      & pendingEdit   .~ []
-                                  , _editState   = MovingCaret
-                                  }
-         in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
-               pure (model'', Nothing)
 
-  | model ^. editState == Deleting =
-      case ea of
-       DeleteAtom -> pure $ backspaceChar model
-       InsertAtom _ ->
-         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
-             model' = model & (localDocument . inflightPatch) .~ Just newPatch
-                            & (localDocument . pendingEdit) .~ []
-                            & editState .~ Inserting
-         in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
-               pure (model'', Nothing)
-
-       MoveCaret {} ->
-         let newPatch   = Patch.fromList (model ^. localDocument ^. pendingEdit)
-             model'     =  model { _localDocument    = (model ^. localDocument) & inflightPatch .~ Just newPatch
-                                                                      & pendingEdit   .~ []
-                                  , _editState   = MovingCaret
-                                  }
-         in do (model'', mwsq) <- handleAction sendWS ea model'
-               sendWS (WebSocketReq (ReqAddPatch (model ^. localDocument ^. forkedAt) newPatch))
-               pure (model'', Nothing)
-
-  | model ^. editState == MovingCaret =
-      case ea of
-       MoveCaret i -> pure $
-         (updateLayout $ model { _index = i
-                               , _caret = i
-                               }, Nothing)
-       InsertAtom {} ->
-         handleAction sendWS ea (model { _editState = Inserting })
-       DeleteAtom {} ->
-         handleAction sendWS ea (model { _editState = Deleting })
--}
 -- | convert from window(?) coordinates to coordinates relative to the
 -- top, left corner of the editor div.
 --
@@ -598,18 +507,6 @@ getAtomNode n a@(atom:atoms) parent childNum =
                do getAtomNode 0 (atom:[]) parent childNum
              o -> error $ "getAtomNode does not handle" ++ show (atom ^. boxContent)
 
-{-
-           do putStrLn $ "getAtomNode childNum=" ++ show childNum
-              children <- childNodes parent
-              item children childNum
--}
-{-
-           case atom ^. boxContent of
-             (RT (RichText (txt:txts))) ->
-               if length txt > n
-               then getAtomNode 0 a parent childNum
-               else getAtomNode (n - (length txt)) ((atom & boxContent .~ (RT (RichText txts))):[]) parent (childNum + 1)
--}
       where
         atomNumNodes :: AtomBox -> Word
         atomNumNodes ab =
@@ -683,37 +580,6 @@ getHBoxNode n (hbox:hboxes) parent childNum =
               case mchild of
                 Nothing      -> error $ "getHBoxNode: mchild is Nothing. Was looking for childNum =" ++ show childNum -- pure Nothing
                 (Just child) -> getAtomNode n (hbox ^. boxContent) child 0
-{-
-getVBoxNode :: Int -> [VBox [HBox [AtomBox]]] -> JSNode -> Word -> IO (Maybe JSNode)
-getVBoxNode n [] _ _ = pure Nothing
-getVBoxNode 0 (vbox:vboxes) parent childNum =
-  do children <- childNodes parent
-     mchild <- item children childNum
-     case mchild of
-       Nothing -> pure Nothing
-       (Just child) -> getHBoxNode 0 (vbox ^. boxContent) child 0
-getVBoxNode n (vbox:vboxes) parent childNum =
-  case vboxLength vbox of
-    n' | n >= n' -> getVBoxNode (n - n') vboxes parent (childNum + 1)
-       | otherwise ->
-           do children <- childNodes parent
-              mchild <- item children childNum
-              case mchild of
-                Nothing -> pure Nothing
-                (Just child) -> getHBoxNode n (vbox ^. boxContent) child 0
--}
-{-
-nodeAtIndex :: Int -> VBox [HBox [AtomBox]] -> JSNode -> Maybe JSNode
-nodeAtIndex 0 layout parentNode =
-  case layout of
-    ((Box _ _ _ hbox):_) ->
-      case hbox of
-        (Box _ _ _ atoms) ->
-          case atoms of
-            (atom:_) ->
-              case atom of
-                (RC RichChar) -> 
--}
 
 allP :: (Atom -> Bool) -> VBox [HBox [AtomBox]] -> Bool
 allP p vbox =
@@ -875,16 +741,7 @@ renderLayout lines =
      <span id="editor-end"></span>
     </div>
   |]
-{-
-  where
-    rlines :: String -> [String]
-    rlines l =
-      let (b, a) = break (\c -> c == '\n' || c == '\r') l
-      in case a of
-       [] -> [b]
-       [c] -> b : [""]
-       (_:cs) -> b : rlines cs
--}
+
 -- | calculate the x offset from the left side of an AtomBox to the
 -- right side of the element at position specified by the index into
 -- the AtomBox.
@@ -1043,22 +900,7 @@ keyDowned sendWS e withModel = withModel $ \model'' ->
         | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
         | c == 40   -> pure Nothing -- model                                        -- down
         | otherwise -> pure Nothing -- model
-{-
-clickEditor :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
-clickEditor sendWS e withModel = withModel $ \model'' ->
-  do model <- updateEditorPos model''
-     let elem = target e
-     targetRect <- getBoundingClientRect elem
-     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-         mIndex = fst <$> indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
-         model' = model & mousePos  ?~ (clientX e, clientY e)
-                        & caret     .~ (fromMaybe (model ^. caret) mIndex)
-                        & targetPos .~ (Just targetRect)
---                        & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
-     case mIndex of
-       (Just i) -> handleAction sendWS (MoveCaret i) model'
-       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
--}
+
 buttonUp :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
 buttonUp sendWS e model'' =
   do model <- updateEditorPos model''
@@ -1094,19 +936,6 @@ commonSelection sendWS newSelection e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
-{- Not sure why this is here. Seems like the documentRange will not have been updated yet?
-                        & bolding   .~
-                           case model ^. documentRange of
-                             Nothing -> (model ^. bolding)
-                             (Just (b,e))
-                               | b == e -> allBold (extractRange (b, succ b) (model ^. localDocument)) -- False
-                               | otherwise -> allBold (extractRange (b,e) (model ^. localDocument))
-                        & italicizing   .~
-                           case model ^. documentRange of
-                             Nothing -> (model ^. italicizing)
-                             (Just (b,e)) ->
-                               allItalics (extractRange (b,e) (model ^. localDocument))
--}
      case mIndex of
        Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
        (Just (i, si)) ->
@@ -1251,12 +1080,13 @@ boldRange sendWS (b, e) model' =
      print newEdit
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret         = succ (model ^. caret)
---                                        , _bolding       = not (model ^. bolding)
---                                        , _italicizing   = not (model ^. italicizing)
                                         }
 
 isBoldFont:: Font -> Bool
 isBoldFont (Common.Font fw _ _) = fw == FW700
+
+isItalicFont:: Font -> Bool
+isItalicFont (Common.Font fw _ _) = fw == FW700
 
 setBold :: Bool -> Font -> Font
 setBold False f = f & fontWeight .~ FW400
@@ -1313,8 +1143,6 @@ italicizeRange sendWS (b, e) model' =
      print newEdit
      pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
                                         , _caret         = succ (model ^. caret)
---                                        , _bolding       = not (model ^. bolding)
-                                        , _italicizing   = not (model ^. italicizing)
                                         }
 
 allItalics :: Vector Atom -> Bool
@@ -1331,23 +1159,6 @@ extractRange (b', e') localDocument =
   let flattened = flattenDocument localDocument
       (b, e) = (min b' e', max b' e')
   in Vector.slice b (e - b) flattened
-
-
-{-
-      atoms = zip (Vector.toList sub) [b..e]
-      newEdit = catMaybes (map (\(a, i) ->
-                             case a of
-                               (RC (RichChar f char)) -> Just $ Replace i a (RC (RichChar (f & fontWeight .~  FW700) char))
-                               _ -> Nothing
-                           ) atoms)
-     print flattened
-     print sub
-     print atoms
-     print newEdit
-     pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
-                                        , _caret       = succ (model ^. caret)
-                                        }
--}
 
 boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 boldChange sendWS ev withModel = withModel $ \model->
@@ -1369,16 +1180,10 @@ italicChange sendWS ev withModel = withModel $ \model->
      refocus model
      case model ^. documentRange of
        Nothing -> pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal)
-                                       & italicizing .~ (not (model ^. italicizing))
                                        & debugMsg .~ Just "ItalicChange")
        (Just (b,e)) ->
          do italicizeRange sendWS (b,e) model
-{-
-italicChange :: MouseEventObject -> WithModel Model -> IO ()
-italicChange e withModel =  withModel $ \model->
-  do preventDefault e
-     pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange")
--}
+
 itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 itemize sendWS e withModel =  withModel $ \model->
   do preventDefault e
@@ -1392,14 +1197,7 @@ editorCopy e withModel =  withModel $ \model->
      dt <- clipboardData e
      setDataTransferData dt "text/plain" "boo-yeah"
      pure $ Just $ model & debugMsg .~ Just "copy"
-{-
-updateSelection :: SelectionEventObject -> WithModel Model -> IO ()
-updateSelection e withModel =
-  withModel $ \model -> do
---    js_alert "updateSelection"
-    sel <- getSelectionData model
-    pure $ Just $ model & selectionData .~ sel
--}
+
 app :: (WebSocketReq -> IO ()) -> Model -> Html Model
 app sendWS model =
   let setFontSize s = EL Click (\e withModel -> withModel $ \m -> pure $ Just $ m & (currentFont . fontSize) .~ s)
@@ -1458,9 +1256,10 @@ app sendWS model =
               <div class="btn-group" data-toggle="buttons">
                <label class=(if (isBoldFont (model ^. currentFont)) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))
                     [ EL Click (boldChange sendWS) ] >
-                <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B <% show $ isBoldFont (model ^. currentFont) %> </label>
-               <label class=(if (model ^. italicizing) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (italicChange sendWS) ] >
---               <label class="btn btn-default" [ EL Click (italicChange sendWS) ] >
+                <input type="checkbox" autocomplete="off" style="font-weight: 800;"/>B</label>
+--               <label class=(if (model ^. italicizing) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))  [ EL Click (italicChange sendWS) ] >
+               <label class=(if (isItalicFont (model ^. currentFont)) then ("btn btn-default active" :: Text) else ("btn btn-default" :: Text))
+                    [ EL Click (italicChange sendWS) ] >
                 <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
                <label class="btn btn-default" [ EL Click (itemize sendWS) ] >
                 <input type="checkbox" autocomplete="off" />•</label>
@@ -1501,8 +1300,6 @@ initModel = Model
       , _pendingPatches = Seq.empty
       , _pendingEdit = []
       }
---  , _bolding       = False
-  , _italicizing   = False
   , _itemizing     = False
   , _connectionId  = Nothing
   , _editState     = Inserting
@@ -1574,18 +1371,6 @@ resInit withModel conn initDoc = withModel $ \model ->
                                        & currentFont .~ case findFontRight (flattenDocument ld) 0 of
                                                          Nothing -> model ^. currentFont
                                                          (Just f) -> f
-{-
-                                       & (localDocument . document) .~ initDoc
-                                       & (localDocument . inflightPatch) .~ Nothing
-                                       & (localDocument . forkedAt) .~ (Seq.length (initDoc ^. patches) - 1)
-                                       & (localDocument . pendingEdit) .~ []
--}
-{-
-                                       & bolding .~
-                                          if Vector.length (flattenDocument ld) >= 0
-                                          then allBold (extractRange (0, 1) ld)
-                                          else False
--}
           )
 
 resAppendPatch sendWS withModel connId (patchId, newPatch) =
@@ -1622,27 +1407,6 @@ resAppendPatch sendWS withModel connId (patchId, newPatch) =
                  pure (model' & caret .~ newCaret)
       Just <$> sendPatch sendWS model'
 
-{-
-  | model ^. connectionId == (Just connId) = pure Map.empty
-  | otherwise              = let toRCs :: Atom -> [RichChar]
-                                 toRCs (Img {})      = []
-                                 toRCs (LineBreak)   = []
-                                 toRCs (RC rc) = [rc]
-                                 toRCs (RT rt) = richTextToRichChars rt
-                                 toRCs' :: Edit Atom -> [RichChar]
-                                 toRCs' (Insert _ a) = toRCs a
-                                 toRCs' (Delete _ _) = []
-                                 toRCs' (Replace _ _ a) = toRCs a
-                             in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList patch))
--}
-{-
-incomingWS :: (MessageEvent -> Maybe action) -> TQueue action -> MessageEvent -> IO ()
-incomingWS decodeAction queue messageEvent =
-  do logMessage messageEvent
-     case decodeAction messageEvent of
-       Nothing -> consoleLog "Failed to decode messageEvent"
-       (Just action) -> atomically $ writeTQueue queue action
--}
 
 foreign import javascript unsafe  "console[\"log\"]($1)" consoleLog :: JS.JSString -> IO ()
 
@@ -1687,351 +1451,7 @@ decodeRes :: MessageEvent -> (Maybe WebSocketRes)
 decodeRes messageEvent =
   case MessageEvent.getData messageEvent of
     (StringData str) -> decodeStrict (CS.pack (JS.unpack str))
-{-
-        Nothing      -> Nothing
-        (Just wsres) -> Ju
-          case wsres of
-            (ResAppendPatch connId (i, path)) ->
-              resAppendPatch connId (i, path)
-            _ -> pure ()
--}
-{-
-  = ResAppendPatch ConnectionId (Int, Patch Atom)
---  | ResUpdateCurrent ConnectionId [Edit Atom]
-  | ResInit ConnectionId (Seq (Patch Atom))
--}
 
 main :: IO ()
 main =
   chili app initAction initModel "ws://localhost:8000/editor/websockets" handleMessage
---  muvWS editorMUV id "ws://localhost:8000/editor/websockets" decodeRes (Just Init)
-
-{- JAS
-update' :: Action
-        -> Model
-        -> IO (Model, Maybe [WebSocketReq])
-update' action model'' = do
-  now <- getPOSIXTime
-  (Just doc)        <- currentDocument
-  (Just editorElem) <- getElementById doc "editor"
-  focus editorElem
-  rect <- getBoundingClientRect editorElem
-  let activity =
-        case action of
-          AddImage {}   -> True
-          KeyPressed {} -> True
-          PasteA {}     -> True
-          KeyDowned {}  -> True
-          MouseClick {} -> True
-          _             -> False
-      forceActivity =
-        if ((not activity) && now >= (model ^. lastActivity) + 2)
-        then True
-        else False
-
-      model = model'' { _editorPos     = Just rect
---                      , _selectionData = ioData ^. bSelectionData
-                      , _lastActivity = if activity then now else (model'' ^. lastActivity)
-                      }
-  newFontMetrics <- case action of
-                      (KeyPressed c) -> do
-                        let rc = RichChar (model ^. currentFont) c
-                        case Map.lookup rc (model ^. fontMetrics) of
-                          Nothing ->
-                            do (Just document) <- currentDocument
-                               (Just measureElem) <- getElementById document "measureElement"
-                               (_, metric) <- getFontMetric measureElem rc
-                               pure (Map.singleton rc metric)
-                          Just {} -> pure Map.empty
-                      (KeyDowned c)
-                        | c == 32 -> do
-                          let rc = RichChar (model ^. currentFont) ' '
-                          case Map.lookup rc (model ^. fontMetrics) of
-                                Nothing ->
-                                  do (Just document) <- currentDocument
-                                     (Just measureElem) <- getElementById document "measureElement"
-                                     (_, metric) <- getFontMetric measureElem rc
-                                     pure (Map.singleton rc metric)
-                                Just {} -> pure Map.empty
-                        | otherwise -> pure Map.empty
-                      (WSRes wsres) ->
-                        case wsres of
-                          (ResAppendPatch connId (_, patch))
-                            | model ^. connectionId == (Just connId) -> pure Map.empty
-                            | otherwise              -> let toRCs :: Atom -> [RichChar]
-                                                            toRCs (Img {})      = []
-                                                            toRCs (LineBreak)   = []
-                                                            toRCs Item          = richTextToRichChars bullet
-                                                            toRCs (RC rc) = [rc]
-                                                            toRCs (RT rt) = richTextToRichChars rt
-                                                            toRCs' :: Edit Atom -> [RichChar]
-                                                            toRCs' (Insert _ a) = toRCs a
-                                                            toRCs' (Delete _ _) = []
-                                                            toRCs' (Replace _ _ a) = toRCs a
-                                                        in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (Patch.toList patch))
-                          (ResInit connectionId patches) ->
-                            let toRCs :: Atom -> [RichChar]
-                                toRCs (Img {})      = []
-                                toRCs (LineBreak)   = []
-                                toRCs Item          = richTextToRichChars bullet
-                                toRCs (RC rc) = [rc]
-                                toRCs (RT rt) = richTextToRichChars rt
-                                toRCs' :: Edit Atom -> [RichChar]
-                                toRCs' (Insert _ a) = toRCs a
-                                toRCs' (Delete _ _) = []
-                                toRCs' (Replace _ _ a) = toRCs a
-                            in calcMetrics (model ^. fontMetrics) (concatMap toRCs' (concatMap Patch.toList patches))
-
-                      _ -> pure Map.empty
-  case action of
-      Init             -> do let rcs = nub $ richTextToRichChars bullet
-                             newMetrics <- calcMetrics (model ^. fontMetrics) rcs
-                             pure (model & fontMetrics  %~ (\old -> old `mappend` newMetrics), Just [WebSocketReq ReqInit])
-
-      ActivityTimeout  -> if forceActivity
-                             then do let (model', req) = handleAction (MoveCaret (model ^. caret)) model
-                                     pure (model' & debugMsg .~ (Just $ Text.pack "Forced update."), req)
-                             else pure (model & debugMsg .~ (Just $ Text.pack $ show $ now), Nothing)
-
-      AddImage         ->  pure $ handleAction (InsertAtom (Img (Image "http://i.imgur.com/YFtU4OV.png" 174 168))) model
-      Itemize e        -> case model ^. itemizing of
-                           False -> pure $ handleAction (InsertAtom Item) (model & itemizing .~ True)
-                           True  -> pure $ (model & itemizing .~ False, Nothing)
-      IncreaseFontSize ->  pure (model & (currentFont . fontSize) %~ succ, Nothing)
-      DecreaseFontSize ->  pure (model & (currentFont . fontSize) %~ (\fs -> if fs > 1.0 then pred fs else fs), Nothing)
-      (SetFontSize s)  -> pure (model & (currentFont . fontSize) .~ s, Nothing)
---      ToggleBold       ->  (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400), Nothing)
-      BoldChange e     -> pure (model & (currentFont . fontWeight) %~ (\w -> if w == FW400 then FW700 else FW400) & debugMsg .~ Just "BoldChange", Nothing)
-      ItalicChange e   -> pure (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal) & debugMsg .~ Just "ItalicChange", Nothing)
-      IncUserId        -> pure (model & userId %~ succ, Nothing)
-
-{-
-      CopyA ceo      ->  -- cd <- clipboardData ceo
-                           -- setDataTransferData cd "text/plain" "Boo-yeah!"
-                         (model & debugMsg .~ Just "copy", Nothing)
-
-      PasteA txt ->  -- txt <- getDataTransferData dt "text/plain"
-        --                       txt2 <- getClipboardData ceo
---                       js_alert txt2
-                     (model & debugMsg .~ Just (textFromJSString txt), Nothing)
--}
-      KeyPressed c  ->
-        do let rc = RichChar (model ^. currentFont) c
-               model' = case Map.lookup rc newFontMetrics of
-                 Nothing -> model
-                 (Just metric) -> set (fontMetrics . at rc) (Just metric) model
-           pure $ handleAction (InsertAtom (RC rc)) model'
-
-      -- used for handling special cases like backspace, space
-      KeyDowned c -- handle \r and \n ?
-        | c == 8    -> pure $ handleAction DeleteAtom model
-        | c == 13   -> case model ^. itemizing of
-                         False -> pure $ handleAction (InsertAtom LineBreak) model
-                         True  -> pure $ handleAction (InsertAtom Item) model
-        | c == 32   -> let rc = RichChar (model ^. currentFont) ' '
-                           model' = case Map.lookup rc newFontMetrics of
-                             Nothing -> model
-                             (Just metric) -> set (fontMetrics . at rc) (Just metric) model
-                       in pure $ handleAction (InsertAtom (RC rc)) model'
-        | c == 37   -> pure $ handleAction (MoveCaret ((model ^. caret) - 1)) model -- left
-        | c == 38   -> pure $ (model, Nothing)                                      -- up
-        | c == 39   -> pure $ handleAction (MoveCaret ((model ^. caret) + 1)) model -- right
-        | c == 40   -> pure $ (model, Nothing)                                      -- down
-        | otherwise -> pure $ (model, Nothing)
-
-      MouseClick e -> do
-           let elem = target e
-           targetRect <- getBoundingClientRect elem
-           let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
-               mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
-               model' = model & mousePos  ?~ (clientX e, clientY e)
-                              & caret     .~ (fromMaybe (model ^. caret) mIndex)
-                              & targetPos .~ (Just targetRect)
-                              & debugMsg  .~ Just (Text.pack (show (model ^. layout)))
-           case mIndex of
-             (Just i) -> pure $ handleAction (MoveCaret i) model'
-             Nothing  -> pure $ (model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click."), Nothing)
-
-      UpdateMetrics -> pure (model, Nothing)
-
-      WSRes wsres ->
-        case wsres of
-          (ResAppendPatch connId (patchId, newPatch))
-            | model ^. connectionId == (Just connId) ->
-              let model' = updateLayout $
-                             model & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                                   & (document . inflightPatch) .~ (Patch.fromList [])
-                                   & (document . forkedAt) .~ patchId
-              in pure (model', Nothing) -- got our own patch back
-
-            | otherwise              -> -- FIXME: probably need to call transform on the patch in progress
-                let model' = updateLayout (model & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
-                                                 & (document . patches) %~ (\oldPatches -> oldPatches |> newPatch)
-                                                 & (document . forkedAt) .~ patchId
-                                                 )
-                    newCaret = if maxEditPos newPatch < (model ^. caret)
-                               then (model ^. caret) + patchDelta (newPatch)
-                               else (model ^. caret)
-                in pure (model' & caret .~ newCaret, Nothing)
-          (ResInit conn initPatches) -> pure $
-            (updateLayout $ model & connectionId .~ Just conn
-                                  & fontMetrics %~ (\old -> old `mappend` newFontMetrics)
-                                  & (document . patches) .~ initPatches
-                                  & (document . inflightPatch) .~ (Patch.fromList [])
-                                  & (document . forkedAt) .~ (Seq.length initPatches - 1)
-                                  & (document . pendingEdit) .~ [], Nothing)
--}
-
-{-
-view' :: Model -> (Html Action, [Canvas])
-view' model =
-  let keyDownEvent     = Event KeyDown  (\e -> when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (preventDefault e) >> pure (KeyDowned (keyCode e)))
-      keyPressEvent    = Event KeyPress (\e -> pure (KeyPressed (chr (charCode e))))
-      clickEvent       = Event Click    (\e -> pure (MouseClick e))
-      boldChange       = Event Click    (\e -> do preventDefault e ; pure (BoldChange e))
-      italicChange     = Event Click    (\e -> do preventDefault e ; pure (ItalicChange e))
-      copyEvent        = Event Copy     (\e -> do preventDefault e ; dt <- clipboardData e ; setDataTransferData dt "text/plain" "boo-yeah" ; pure (CopyA e))
-      pasteEvent       = Event Paste    (\e -> do preventDefault e ; dt <- clipboardData e ; txt <- getDataTransferData dt "text/plain" ; pure (PasteA txt))
-      addImage         = Event Click    (\e -> pure AddImage)
-      increaseFontSize = Event Click    (\e -> pure IncreaseFontSize)
-      decreaseFontSize = Event Click    (\e -> pure DecreaseFontSize)
-      setFontSize n    = Event Click    (\e -> pure (SetFontSize n))
-      incUserId        = Event Click    (\e -> pure IncUserId)
-      itemize          = Event Click    (\e -> do preventDefault e ; pure (Itemize e))
-  in
-         ([hsx|
-           <div>
---            <p><% show ( (model ^. layout)) %></p>
-
---            <p><% Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
---            <p><% show $ layoutBoxes 300 (0, map (textToBox (model ^. fontMetrics)) $ textToWords $ Text.pack $ Vector.toList (apply (Patch.fromList (model ^. document)) mempty)) %></p>
-             <% if True
-                 then <div style="position: absolute; left: 800px; width: 800px;">
-                             <h1>Debug</h1>
-                             <p>userId: <% show (model ^. userId) %></p>
-                             <p>debugMsg: <% show (model ^. debugMsg) %></p>
-                             <p>Document: <% show (model ^. document) %></p>
---                             <p>Patches:  <% show (model  ^. patches) %></p>
-                             <p>Index: <% show (model ^. index) %></p>
-                             <p>Caret: <% show (model ^. caret) %></p>
-                             <p>mousePos: <% show (model ^. mousePos) %></p>
-                             <p>editorPos: <% let mpos = model ^. editorPos in
-                                              case mpos of
-                                                 Nothing -> "(,)"
-                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p><% let mepos = model ^. editorPos in
-                                   case mepos of
-                                     Nothing -> "(,)"
-                                     (Just epos) ->
-                                       case model ^. mousePos of
-                                         Nothing -> "(,)"
-                                         (Just (mx, my)) -> show (mx - (rectLeft epos), my - (rectTop epos)) %></p>
-                             <p>targetPos: <% let mpos = model ^. targetPos in
-                                              case mpos of
-                                                Nothing -> "(,)"
-                                                (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
-                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
-                                <% case model ^. selectionData of
-                                     Nothing -> <p>No Selection</p>
-                                     (Just selectionData) ->
-                                       <div>
-                                        <p>Selection: count=<% show $ selectionData ^. rangeCount %></p>
-                                        <p>Selection: len=<% show $ length $ selectionData ^. selectionString %></p>
-                                        <p>Selection: toString()=<% selectionData ^. selectionString %></p>
-                                       </div>
-                                %>
-                             <p>Current Font <% show (model ^. currentFont) %></p>
-                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
-
-
-                      </div>
-                 else <span></span> %>
-
-            <h1>Editor</h1>
-            <div class="form-line editor-toolbar row">
-            {-
-             <div class="col-md-2">
---              <button type="button" class="btn btn-default" [addImage]>Add Image</button>
---              <button type="button" class="btn btn-default" [increaseFontSize]>+</button>
---              <button type="button" class="btn btn-default" [decreaseFontSize]>-</button>
-             </div>
--}
-{-
-             <div class="col-md-2">
-              <div class="input-group">
-               <div class="input-group-btn">
-                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span class="caret"></span></button>
-                <ul class="dropdown-menu">
-                 <li><a href="#" [setFontSize 10]>10</a></li>
-                 <li><a href="#" [setFontSize 12]>12</a></li>
-                 <li><a href="#" [setFontSize 14]>14</a></li>
-                 <li><a href="#" [setFontSize 16]>16</a></li>
-                 <li><a href="#" [setFontSize 18]>18</a></li>
-                </ul>
-               </div>
-               <input type="text" class="form-control col-xs-1" aria-label="..." value=(Text.pack $ show $ model ^. currentFont ^. fontSize) />
-              </div>
-            </div>
-              -}
-            <div class="col-md-6">
---            <button [toggleBold]>Toggle Bold</button>
-              <div class="btn-group" data-toggle="buttons">
-               <label class="btn btn-default" [boldChange]>
-                <input type="checkbox" autocomplete="off" style="font-weight: 800;" />B</label>
-               <label class="btn btn-default" [italicChange]>
-                <input type="checkbox" autocomplete="off" style="font-style: italic;" />I</label>
-               <label class="btn btn-default" [itemize]>
-                <input type="checkbox" autocomplete="off" />•</label>
-
---               <button type="button" class="btn btn-default" [itemize]>•</button>
-              </div>
---              <button [incUserId]>UserId+</button>
-             </div>
-            </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 300px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" autofocus="autofocus" [keyDownEvent, keyPressEvent, clickEvent, copyEvent] >
-               <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-               <% renderLayout (model ^. layout) %>
-            </div>
-           </div>
-          |], [])
-{-
-editorMUV :: MUV IO Model Action [WebSocketReq]
-editorMUV =
-  MUV { model  = Model { _document      = Document { _patches = mempty
-                                                   , _inflightPatch = Patch.fromList []
-                                                   , _forkedAt = 0
-                                                   , _pendingEdit = []
-                                                   }
-                       , _itemizing     = False
-                       , _connectionId  = Nothing
-                       , _editState     = Inserting
-                       , _index         = 0
-                       , _caret         = 0
-                       , _fontMetrics   = Map.empty
-                       , _currentFont   = defaultFont
-                       , _debugMsg      = Nothing
-                       , _mousePos      = Nothing
-                       , _editorPos     = Nothing
-                       , _targetPos     = Nothing
-                       , _layout        = Box 0 0 False []
-                       , _maxWidth      = 300
-                       , _selectionData = Nothing
-                       , _userId        = UserId 0
-                       , _lastActivity  = 0
-                       }
---      , browserIO = browserIO'
-      , update = update'
-      , view   = view'
-      }
-
-decodeRes :: MessageEvent -> Maybe Action
-decodeRes messageEvent =
-  case MessageEvent.getData messageEvent of
-    (StringData str) ->
-      case decode (C.pack (JS.unpack str)) of
-        Nothing      -> Nothing
-        (Just wsres) -> Just (WSRes wsres)
--}
--}
