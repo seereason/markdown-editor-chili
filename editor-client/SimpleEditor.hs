@@ -38,7 +38,7 @@ It would be nice to have a better document representation. At the moment the fol
 import Common
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TQueue (TQueue, newTQueue, writeTQueue)
-import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set, _2)
+import Control.Lens ((^.), (.~), (?~), (&), (%~), (^?), _Just, set, _2, foldrOf, folded)
 import Control.Lens.At (at, ix)
 import Control.Lens.TH (makeLenses)
 import Control.Monad (when)
@@ -202,6 +202,20 @@ calcSizes lines =
           , _boxContent   = boxes
           }
 
+charToBox :: FontMetrics
+          -> RichChar
+          -> AtomBox
+charToBox fm rc =
+  Box { _boxWidth     = getWidth fm rc
+      , _boxHeight    = getHeight fm rc
+      , _boxLineBreak = False
+      , _boxContent   = RC rc
+      }
+  where
+    getWidth, getHeight :: FontMetrics -> RichChar -> Double
+    getWidth  fm c = maybe 0 fst (Map.lookup c fm)
+    getHeight fm c = maybe 0 snd (Map.lookup c fm)
+
 -- | convert a 'Text' to a 'Box'.
 --
 -- Note that the Text will be treated as 'unbreakable'. If you want to
@@ -238,28 +252,39 @@ richCharsToWords txt =
                in (word : richCharsToWords rest)
 
 -- | FIXME: possibly not tail recursive -- should probably use foldr or foldl'
-layoutBoxes :: Double -> (Double, [Box c a]) -> [[Box c a]]
+layoutBoxes :: Double -> (Double, [[Box c a]]) -> [[Box c a]]
 layoutBoxes maxWidth (currWidth, []) = []
-layoutBoxes maxWidth (currWidth, (box:boxes))
+layoutBoxes maxWidth (currWidth, (hbox@(b0:bs):boxes))
+
   -- handle case were the box starts with a linebreak
-  | box ^. boxLineBreak =
+  | b0 ^. boxLineBreak =
 --      [] : layoutBoxes maxWidth (0, (box & boxLineBreak .~ False):boxes)
-    (layoutBoxes maxWidth (currWidth, (box & boxLineBreak .~ False):[]) ++ (layoutBoxes maxWidth (0, boxes)))
-  | currWidth + (box ^. boxWidth) <= maxWidth =
-      case layoutBoxes maxWidth ((currWidth + (box ^. boxWidth)), boxes) of
-       [] -> [[box]] -- this is the last box
-       (line:lines) -> (box:line):lines
+    (layoutBoxes maxWidth (currWidth, ((b0 & boxLineBreak .~ False):bs):[]) ++ (layoutBoxes maxWidth (0, boxes)))
+
+
+  | currWidth + (foldrOf (folded . boxWidth) (+) 0 hbox) {- (hbox ^. boxWidth) -} <= maxWidth =
+      case layoutBoxes maxWidth ((currWidth + (foldrOf (folded . boxWidth) (+) 0 hbox)), boxes) of
+       [] -> [hbox] -- this is the last box
+       (line:lines) -> (hbox++line):lines
+
   -- if a box is longer than the maxWidth we will place it at the start of a line and let it overflow
-  | (currWidth == 0) && (box ^. boxWidth > maxWidth) =
-      [box] : layoutBoxes maxWidth (0, boxes)
+  | (currWidth == 0) && ((foldrOf (folded . boxWidth) (+) 0 hbox) > maxWidth) =
+      hbox : layoutBoxes maxWidth (0, boxes)
+
   | otherwise =
-      ([]:layoutBoxes maxWidth (0, box:boxes))
+      ([]:layoutBoxes maxWidth (0, hbox:boxes))
+
+hboxIt :: [Box o a] -> HBox [Box o a]
+hboxIt items =
+  let maxHeight  = maximum [h | Box _ h _ _ <- items]
+      totalWidth = sum     [w | Box w _ _ _ <- items]
+  in Box totalWidth maxHeight False items
 
 -- |
 -- FIXME: should probably use a fold or something
 boxify :: FontMetrics
        -> Vector Atom
-       -> [AtomBox]
+       -> [[AtomBox]]
 boxify fm v
   | Vector.null v = []
   | otherwise =
@@ -267,16 +292,23 @@ boxify fm v
       RC {} ->
         case Vector.span isRichChar v of
           (richChars, rest) ->
+            (map (map (charToBox fm)) $ richCharsToWords $ (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
+
+{-
+      RC {} ->
+        case Vector.span isRichChar v of
+          (richChars, rest) ->
             (map (textToBox fm) $ map richCharsToRichText $ richCharsToWords $ (Vector.toList (Vector.map unRichChar richChars))) ++ (boxify fm rest)
+-}
       atom@(Img img) ->
-        (Box (img ^. imageWidth) (img ^. imageHeight) False atom) : boxify fm (Vector.tail v)
+        ([Box (img ^. imageWidth) (img ^. imageHeight) False atom] : boxify fm (Vector.tail v))
       LineBreak ->
-        (Box 0 16 True LineBreak : boxify fm (Vector.tail v)) -- FIXME: height should probably be the height of a space char?
+        ([[Box 0 16 True LineBreak]]  ++ boxify fm (Vector.tail v)) -- FIXME: height should probably be the height of a space char?
       Item ->
         let atomBox = (textToBox fm bullet) { _boxLineBreak = True
                                             , _boxContent = Item
                                             }
-        in (atomBox : boxify fm (Vector.tail v))
+        in ([atomBox] : boxify fm (Vector.tail v))
       atom -> error $ "boxify does not handle this atom yet: " ++ show atom
 
 atomsToLines :: FontMetrics
@@ -379,11 +411,11 @@ handleAction sendWS editAction model =
                                    case model'' ^. caret of
                                      0 ->
                                        case findFontRight (flattenDocument (model'' ^. localDocument)) 0 of
-                                       Nothing -> model'' ^. currentFont
-                                       (Just f) -> error "could not findFontRight" -- f
+                                       Nothing -> error $ "could not findFontRight when caret = " ++ show (model'' ^. caret) -- f
+                                       (Just f) -> f
                                      n -> case findFontLeft (flattenDocument (model'' ^. localDocument)) (pred n) of
-                                       Nothing -> model'' ^. currentFont
-                                       (Just f) -> error "could not findFontLeft" -- f
+                                       Nothing -> error $ "could not findFontLeft when n = " ++ show n -- f
+                                       (Just f) -> f
                                  _ -> model'' ^. currentFont
                              (Just (b,e))
                                | b == e && b == 0 && Vector.length (flattenDocument (model'' ^. localDocument)) == 0 -> setBold False (model'' ^. currentFont)
@@ -421,24 +453,66 @@ relativeClickPos model mx my =
     Nothing     -> Nothing
     (Just epos) -> Just (mx - (rectLeft epos), my - (rectTop epos))
 
--- if Y is greater than any line, return the last line
+
 lineAtY :: VBox [HBox a] -> Double -> Maybe Int
 lineAtY vbox y = go (vbox ^. boxContent) y 0
   where
     go [] _ n
-      | n > 0 = Just (pred n)
+      | n > 0 = Nothing -- Just (pred n) -- if Y is greater than any line, return the last line ?
       | otherwise = Nothing
 --      | n > 0 = error $ "lineAtY: " ++ show n -- Just (n - 1) -- Nothing
 --      | otherwise = Nothing
     go (hbox:hboxes) y n =
       if y < hbox ^. boxHeight
-      then trace ("lineAtY " ++ show n) (Just n)
+      then {- trace ("lineAtY " ++ show n) -} (Just n)
       else go hboxes (y - hbox ^. boxHeight) (succ n)
 
+
+indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> (Int, Int)
+indexAtX fm hbox x = go (hbox ^. boxContent) x 0
+  where
+    indexAtX' :: [RichChar] -> Double -> (Int, Int) -> (Int, Int)
+    indexAtX' [] x (i, si) = (i, si)
+    indexAtX' (c:cs) x (i, si) =
+      let cWidth =  fst $ fromJust $ Map.lookup c fm
+      in if x < cWidth
+         then (i, si)
+         else indexAtX' cs (x - cWidth) (succ i, succ si)
+    go :: [AtomBox] -> Double -> Int -> (Int, Int)
+    go [] x i = (i,0) -- FIXME? error "(i,0)" -- (i, 0)
+    go (box:boxes) x i =
+      case box ^. boxContent of
+        (RC rc)
+          | x < (box ^. boxWidth) -> (i, 0)
+          | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
+        (RT txt')
+         | x < (box ^. boxWidth) ->
+            case txt' of
+              (RichText (txt:txts)) -> indexAtX' (richTextToRichChars (RichText (txt:txts))) x (i, 0)
+              _ -> error "indexAtX -> go -> multiple txts not handle correctly."
+         | boxes == [] ->
+                case txt' of
+                  (RichText ((_,txt):[])) ->
+                    let len = Text.length txt in
+                    (i + len , len)
+                  _ -> error "indexAtX 2 -> go -> multiple txts not handle correctly."
+
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + richTextLength txt')
+        (Img img)
+         | x < (box ^. boxWidth) -> (i, i)
+         | otherwise ->  go boxes (x - box ^. boxWidth) (i + 1)
+        LineBreak
+          | boxes == [] -> (i, 0)
+          | otherwise -> go boxes x (i + 1)
+        Item
+         | x < (box ^. boxWidth) -> (i, i)
+         | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
+        EOF -> (i,i) -- fixme?
 
 -- If we put Characters in boxes then we could perhaps generalize this
 --
 -- (index relative to start, index relative to hbox it is in)
+{-
 indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> (Int, Int)
 indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
@@ -476,7 +550,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
          | x < (box ^. boxWidth) -> (i, i)
          | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
         EOF -> (i,i) -- fixme?
-
+-}
 
 getAtomNode :: Int -> [AtomBox] -> JSNode -> Word -> IO (Maybe JSNode)
 getAtomNode 0 [] parent childNum = error $ "getAtomNode 0 []" -- pure Nothing
@@ -603,7 +677,7 @@ indexAtPos :: FontMetrics           -- ^ font metrics for characters in this doc
            -> Maybe (Int, Int)             -- ^ index of atom if a match was found
 indexAtPos fm vbox (x,y) =
   case lineAtY vbox y of
-   Nothing -> Nothing -- error "indexAtPos: Nothing"
+   Nothing -> Just (sumPrevious (vbox ^. boxContent), 0) -- Nothing -- error "indexAtPos: Nothing"
    (Just i) ->
      let (ix, subIx) = (indexAtX fm ((vbox ^. boxContent)!!i) x)
      in Just $ ((sumPrevious $ take i (vbox ^. boxContent)) + ix, subIx)
@@ -703,6 +777,7 @@ renderAtomBox :: AtomBox
 -- renderTextBox box = CDATA True (box ^. boxContent)
 renderAtomBox box =
   case box ^. boxContent of
+    (RC (RichChar font c)) -> [[hsx| <span style=(fontToStyle font)><% nbsp (Text.singleton c) %></span> |]]
     (RT (RichText txts)) -> map renderText txts
     (Img img)            -> [[hsx|<img src=(img ^. imageUrl) />|]]
     LineBreak            -> [[hsx|<span style="display:inline-block;"></span>|]] -- FIXME: why do we explicitly render a LineBreak? Perhaps so we can have multiple empty lines between paragraphs? But isn't that handled by the line div? Perhaps the line div needs something in it or it is zero height?
@@ -1088,7 +1163,7 @@ boldRange sendWS (b, e) model' =
                                         }
 
 findFontLeft :: Vector Atom -> Int -> Maybe Font
-findFontLeft atoms 0 = Nothing
+findFontLeft atoms (-1) = Nothing
 findFontLeft atoms n =
   case atoms ! n of
     (RC (RichChar f _)) -> Just f
@@ -1161,7 +1236,7 @@ boldChange sendWS ev withModel = withModel $ \model->
 --                                       & bolding .~ (not (model ^. bolding))
                                        & debugMsg .~ Just "BoldChange")
        (Just (b,e)) ->
-         do boldRange sendWS (b,e) model
+         do boldRange sendWS (min b e, max b e) model
 
 italicChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 italicChange sendWS ev withModel = withModel $ \model->
@@ -1172,7 +1247,7 @@ italicChange sendWS ev withModel = withModel $ \model->
        Nothing -> pure $ Just $ (model & (currentFont . fontStyle) %~ (\fs -> if fs == Normal then Italic else Normal)
                                        & debugMsg .~ Just "ItalicChange")
        (Just (b,e)) ->
-         do italicizeRange sendWS (b,e) model
+         do italicizeRange sendWS (min b e, max b e) model
 
 itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
 itemize sendWS e withModel =  withModel $ \model->
@@ -1237,6 +1312,7 @@ app sendWS model =
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
+                             <p>Vector Atom: <div><% show $ flattenDocument (model ^. localDocument) %></div></p>
                              <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>

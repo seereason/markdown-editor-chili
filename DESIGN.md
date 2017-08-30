@@ -130,3 +130,13 @@ So, this fomulation of `LocalDocument` makes sense:
 The `_inflightPatch` is the one we are currently sending (or trying to
 send) to the server. We can continue to keep the `_currentEdit` open
 until we receive the applied patch back from the server.
+
+Atoms & Layout
+--------------
+
+A document is a vector of things. In this case a thing is an
+`Atom`. And `Atom` is something that can not be broken down into a
+smaller piece.
+
+Accordingly there should be a 1-to-1 correspondance between the caret
+position and the atom index?
