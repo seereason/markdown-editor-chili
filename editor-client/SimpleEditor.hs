@@ -411,7 +411,9 @@ handleAction sendWS editAction model =
                                    case model'' ^. caret of
                                      0 ->
                                        case findFontRight (flattenDocument (model'' ^. localDocument)) 0 of
-                                       Nothing -> error $ "could not findFontRight when caret = " ++ show (model'' ^. caret) -- f
+                                       Nothing -> case findFontRight (flattenDocument (model'' ^. localDocument)) 0 of
+                                         Nothing -> (model'' ^. currentFont) -- error $ "could not findFontRight or findFontLeft when caret = " ++ show (model'' ^. caret) -- f
+                                         (Just f) -> f
                                        (Just f) -> f
                                      n -> case findFontLeft (flattenDocument (model'' ^. localDocument)) (pred n) of
                                        Nothing -> error $ "could not findFontLeft when n = " ++ show n -- f
@@ -873,8 +875,8 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: may
 
     -- go over the atoms in a line
     go' :: [AtomBox] -> Double -> Int -> (Double, Double, Double) -> Either (Int, (Double, Double, Double)) (Maybe (Double, Double, Double))
-    go' [] _ i curPos = trace ("go' [] =" ++ show (i, curPos)) (Left (i, curPos))
-    go' _  _ 0 curPos = trace ("go' 0 = " ++ show (0, curPos)) (Right (Just curPos))
+    go' [] _ i curPos = {- trace ("go' [] =" ++ show (i, curPos)) -} (Left (i, curPos))
+    go' _  _ 0 curPos = {- trace ("go' 0 = " ++ show (0, curPos)) -} (Right (Just curPos))
     -- if the last item in a line is a LineBreak
     go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
 
@@ -1032,11 +1034,11 @@ commonSelection sendWS newSelection e model'' =
               (Just range) ->
                    do (Just doc) <- currentDocument
                       (Just editorNode) <- getElementById  doc "editor-layout"
-                      debugStrLn "editor-layout"
+                      -- debugStrLn "editor-layout"
                       nt <- nodeType editorNode
-                      putStrLn $ nodeTypeString nt
+                      -- debugStrLn $ nodeTypeString nt
                       nn <- nodeName editorNode
-                      putStrLn $ JS.unpack nn
+                      -- debugStrLn $ JS.unpack nn
                       (Just lines) <- fmap toJSNode <$> getFirstChild editorNode
                       mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) lines 0
                       selNode <-
@@ -1047,12 +1049,12 @@ commonSelection sendWS newSelection e model'' =
                                         pure (toJSNode editorEndNode)
 --                                        pure (Just model')
                           (Just selNode) -> pure selNode
-                      nt <- nodeType selNode
-                      putStrLn $ nodeTypeString nt
-                      nn <- nodeName selNode
-                      putStrLn $ JS.unpack nn
-                      selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
-                      putStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                      -- nt <- nodeType selNode
+                      -- debugStrLn $ nodeTypeString nt
+                      -- nn <- nodeName selNode
+                      -- debugStrLn $ JS.unpack nn
+                      -- selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                      -- debugStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
                       mTextNode <- getFirstChild selNode
                       if newSelection
                                then do (node, off) <-
@@ -1062,8 +1064,8 @@ commonSelection sendWS newSelection e model'' =
                                                     setEnd   range (toJSNode selNode) 0
                                                     pure (toJSNode selNode, 0)
                                                (Just textNode) ->
-                                                 do jstr <- nodeValue textNode
-                                                    debugStrLn $ "nodeValue = " ++ JS.unpack jstr
+                                                 do -- jstr <- nodeValue textNode
+                                                    -- debugStrLn $ "nodeValue = " ++ JS.unpack jstr
                                                     setStart range (toJSNode textNode) si
                                                     setEnd range (toJSNode textNode) si
                                                     pure (toJSNode textNode, si)
@@ -1137,9 +1139,33 @@ selectEditor sendWS mouseEV mouseEventObject withModel =
                   pure $ Just $ m' & mouseActivity .~ MouseNoop
              _ -> pure Nothing
 
+modifyFontRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> (Vector Atom -> a) -> (a -> RichChar -> RichChar) -> Model -> IO (Maybe Model)
+modifyFontRange sendWS (b, e) calcVal modifyRC model' =
+  do model <- sendPatch sendWS model'
+     let -- flattened = flattenDocument (model ^. localDocument)
+         -- sub = Vector.slice b (e - b) flattened
+         sub = extractRange (b, e) (model ^. localDocument)
+         atoms = zip (Vector.toList sub) [b..e]
+         newVal = calcVal sub -- if allBold sub then FW400 else FW700
+         newEdit = catMaybes (map (\(a, i) ->
+                             case a of
+                               (RC rc@(RichChar f char)) -> Just $ Replace i a (RC (modifyRC newVal rc)) -- (RichChar (f & fontWeight .~  newFontWeight) char))
+                               _ -> Nothing
+                           ) atoms)
+         chars = [ rc | (Replace _ _ (RC rc)) <- newEdit ]
+     fms <- calcMetrics (model ^. fontMetrics) chars
+--     print flattened
+--     print sub
+--     print atoms
+--     print newEdit
+     pure $ Just $ updateLayout $ model { _localDocument = (model ^. localDocument) & pendingEdit .~ newEdit
+                                        -- , _caret         = succ (model ^. caret)
+                                        , _fontMetrics   = (model ^. fontMetrics) `mappend` fms
+                                        }
+
 -- what if already bold? or a mix of bold and not bold?
-boldRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
-boldRange sendWS (b, e) model' =
+boldRangeOld :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
+boldRangeOld sendWS (b, e) model' =
   do model <- sendPatch sendWS model'
      let -- flattened = flattenDocument (model ^. localDocument)
          -- sub = Vector.slice b (e - b) flattened
@@ -1161,6 +1187,13 @@ boldRange sendWS (b, e) model' =
                                         , _caret         = succ (model ^. caret)
                                         , _fontMetrics   = (model ^. fontMetrics) `mappend` fms
                                         }
+
+boldRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
+boldRange sendWS (b,e) model' =
+  modifyFontRange sendWS (b,e) calcVal modifyRC model'
+  where
+    calcVal sub = if allBold sub then FW400 else FW700
+    modifyRC v (RichChar f c) = RichChar (f & fontWeight .~ v) c
 
 findFontLeft :: Vector Atom -> Int -> Maybe Font
 findFontLeft atoms (-1) = Nothing
@@ -1190,7 +1223,14 @@ allBold atoms = F.foldr (\atom b -> isBold atom && b) True atoms
         _ -> True
 
 italicizeRange :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
-italicizeRange sendWS (b, e) model' =
+italicizeRange sendWS (b,e) model' =
+  modifyFontRange sendWS (b,e) calcVal modifyRC model'
+  where
+    calcVal sub = if allItalics sub then Normal else Italic
+    modifyRC v (RichChar f c) = RichChar (f & fontStyle .~ v) c
+
+italicizeRangeOld :: (WebSocketReq -> IO ()) -> (Int, Int) -> Model -> IO (Maybe Model)
+italicizeRangeOld sendWS (b, e) model' =
   do model <- sendPatch sendWS model'
      let -- flattened = flattenDocument (model ^. localDocument)
          -- sub = Vector.slice b (e - b) flattened
@@ -1272,6 +1312,7 @@ app sendWS model =
              <% if True
                  then <div style="position: absolute; left: 800px; width: 800px;">
                              <h1>Debug</h1>
+{-
                              <p>userId: <% show (model ^. userId) %></p>
                              <p>debugMsg: <% show (model ^. debugMsg) %></p>
 --                             <p>LocalDocument: <% show (model ^. localDocument) %></p>
@@ -1292,6 +1333,7 @@ app sendWS model =
                                        </div>
                              %>
 -}
+
                              <p>indexToPos (x,y,h): <% show (indexToPos (model ^. caret) model) %> </p>
                              <p>caretPos: <% show $ caretPos model (indexToPos (model ^. caret) model) %></p>
                              <p>mousePos: <% show (model ^. mousePos) %></p>
@@ -1299,6 +1341,7 @@ app sendWS model =
                                               case mpos of
                                                  Nothing -> "(,)"
                                                  (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+
                              <p>mousePos - editorPos: <% let mepos = model ^. editorPos in
                                    case mepos of
                                      Nothing -> "(,)"
@@ -1310,9 +1353,11 @@ app sendWS model =
                                               case mpos of
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
+
                              <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
                              <p>Vector Atom: <div><% show $ flattenDocument (model ^. localDocument) %></div></p>
+-}
                              <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>
@@ -1378,6 +1423,7 @@ initModel = Model
   , _editorPos     = Nothing
   , _targetPos     = Nothing
   , _layout        = Box 0 0 False []
+--  , _maxWidth      = 200
   , _maxWidth      = 200
   , _selectionData = Nothing
   , _currentRange  = Nothing
