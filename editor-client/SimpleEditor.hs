@@ -855,6 +855,18 @@ indexToPosAtom index fm box =
 -- It is a bit tricky to deal with the caret position that is at the very end of the document.
 -- Where the caret goes depends if the last atom is a LineBreak or not.
 --
+{-
+How to calculation position:
+
+The layout is a list of nested boxes.
+
+Things seem mostly straight forward -- we normally do not care if a line ends with an explicity LineBreak or is text-wrapped.
+
+The tricky part seems to be when the caret is at the very end of the document. If there is no trailing LineBreak, the caret should be on the same line, if there is a LineBreak it should be on the next line.
+
+
+-}
+
 indexToPos :: Int
            -> Model
            -> Maybe (Double, Double, Double)
@@ -869,16 +881,18 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: may
        (Right curPos') -> trace ("go = " ++ show curPos') curPos'
        -- otherwise add the height of that line and start
        -- looking in the next line
-       (Left (i', (x,y,height))) -- FIXME: deal with trailing newline versus no trailing newline
-         | hboxes == [] -> Just (x,y,height)
-         | otherwise -> go hboxes i' (0, y {- + hbox ^. boxHeight-}, height)
+       (Left (i', (x,y,height), broke)) -- FIXME: deal with trailing newline versus no trailing newline
+         | hboxes == [] -> trace ("go ended with i' = " ++ show i') $ Just (x,y,height)
+         | otherwise -> go hboxes i' (0, if broke then y else y + hbox ^. boxHeight, height)
 
     -- go over the atoms in a line
-    go' :: [AtomBox] -> Double -> Int -> (Double, Double, Double) -> Either (Int, (Double, Double, Double)) (Maybe (Double, Double, Double))
-    go' [] _ i curPos = {- trace ("go' [] =" ++ show (i, curPos)) -} (Left (i, curPos))
+    go' :: [AtomBox] -> Double -> Int -> (Double, Double, Double) -> Either (Int, (Double, Double, Double), Bool) (Maybe (Double, Double, Double))
+    -- if there are no more atoms in the line, but we have not reached the index, return Left
+    go' [] _ i curPos = {- trace ("go' [] =" ++ show (i, curPos)) -} (Left (i, curPos, False))
+    -- if we are at index 0, then we have found the position, return Right
     go' _  _ 0 curPos = {- trace ("go' 0 = " ++ show (0, curPos)) -} (Right (Just curPos))
     -- if the last item in a line is a LineBreak
-    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
+    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak " ++ show (x,y,height)) $ Left (pred i, (x,y + lineHeight,height), True) -- trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
 
     go' (box:boxes) lineHeight i (x,y,height) =
       -- if the index is greater than the length of the next atom
