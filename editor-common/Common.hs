@@ -41,7 +41,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
-import Servant.API ()
+-- import Servant.API ()
 -- import Servant.Isomaniac (HasIsomaniac, MUV(..), ReqAction(..), isomaniac, muv, runIdent)
 -- import Servant.Common.BaseUrl
 -- import Servant.Common.Req (Req(..))

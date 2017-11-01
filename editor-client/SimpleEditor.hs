@@ -16,7 +16,7 @@
 {-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE PolyKinds #-}
-module Main where
+module SimpleEditor where
 
 -- NEXT STEP: move layout recalculation into a single location
 -- NEXT STEP: when inserting a foreign patch, we need to update font metrics with any new characters
@@ -748,9 +748,12 @@ foreign import javascript unsafe "$1[\"focus\"]()" js_focus ::
 calcMetrics :: FontMetrics -> [RichChar] -> IO (Map RichChar (Double, Double))
 calcMetrics fm rcs =
   do (Just doc)    <- currentDocument
-     (Just measureElem) <- getElementById doc "measureElement"
-     metrics <- mapM (calcMetric measureElem) (nub rcs)
-     pure (Map.fromList (catMaybes metrics))
+     mMeasureElem <- getElementById doc "measureElement"
+     case mMeasureElem of
+       Nothing -> pure Map.empty
+       (Just measureElem) ->
+         do metrics <- mapM (calcMetric measureElem) (nub rcs)
+            pure (Map.fromList (catMaybes metrics))
   where
     calcMetric measureElem rc =
       case Map.lookup rc fm of
@@ -1372,7 +1375,7 @@ app sendWS model =
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
                              <p>Vector Atom: <div><% show $ flattenDocument (model ^. localDocument) %></div></p>
 -}
-                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
+--                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>
             <h1>Super Awesome Editor</h1>
@@ -1391,7 +1394,7 @@ app sendWS model =
               </div>
              </div>
             </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 600px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
+            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 300px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
                              , EL KeyDown  (keyDowned sendWS)
                              , EL MouseDown (selectEditor sendWS MouseDown)
                              , EL MouseUp   (selectEditor sendWS MouseUp)
@@ -1408,9 +1411,9 @@ app sendWS model =
            </div>
           |])
 
-chili app initAction model url handleWS =
+chili app initAction model url handleWS elemId =
   do (Just doc)   <- currentDocument
-     (Just murv) <- getElementById doc "murv"
+     (Just murv) <- getElementById doc elemId
 --     (Just body)  <- item nodes 0
      loop doc (toJSNode murv) model initAction (Just url) handleWS app
 --     initRemoteWS url (handleWS updateModel)
@@ -1578,6 +1581,3 @@ decodeRes messageEvent =
   case MessageEvent.getData messageEvent of
     (StringData str) -> decodeStrict (CS.pack (JS.unpack str))
 
-main :: IO ()
-main =
-  chili app initAction initModel "ws://localhost:8000/editor/websockets" handleMessage

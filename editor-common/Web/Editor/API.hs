@@ -13,7 +13,7 @@ import           Data.Patch (Patch, Edit(..), toList, fromList, apply, diff)
 import           Data.Sequence (Seq)
 import           Data.Text (Text)
 import           Data.UserId(UserId(..))
-import           Servant.API ((:<|>), (:>), ReqBody, JSON, Post, Raw)
+-- import           Servant.API ((:<|>), (:>), ReqBody, JSON, Post, Raw)
 import           Web.HttpApiData (FromHttpApiData, ToHttpApiData)
 
 data WSRequest
@@ -35,10 +35,11 @@ data WebSocketRes
   | ResInit ConnectionId Document
     deriving Show
 deriveJSON defaultOptions ''WebSocketRes
-
+{-
 type EditorAPI =
   "editor" :>
     ( "edit" :> ReqBody '[JSON] (Patch Atom) :> Post '[JSON] ()
            :<|> Raw
     )
 
+-}

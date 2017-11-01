@@ -1,13 +1,5 @@
-module Main where
+module EditorServer where
 
-import Happstack.Server
-import EditorServer
-
-main :: IO ()
-main =
-  do editorPart <- mkEditor
-     simpleHTTP nullConf editorPart
-{-
 import Common               (Atom, ConnectionId, Document(..), emptyDocument, merge, patches)
 import Control.Monad        (MonadPlus, msum, forever)
 import Control.Monad.Trans  (MonadIO(liftIO))
@@ -32,7 +24,7 @@ import Happstack.Server (Response, ServerPartT, Browsing(EnableBrowsing), asCont
 import Happstack.Server.WebSockets (runWebSocketsHappstack)
 -- import Servant.API hiding (Patch)
 -- import Servant.Happstack
-import Web.Editor.API (EditorAPI, WebSocketReq(..), WebSocketRes(..), WSRequest(..))
+import Web.Editor.API (WebSocketReq(..), WebSocketRes(..), WSRequest(..))
 import Network.WebSockets (Connection, ServerApp, acceptRequest, receiveData, sendBinaryData, sendTextData)
 
 -- instance Monoid ServantErr
@@ -128,7 +120,6 @@ websockets :: (MonadIO m) =>
            -> ServerPartT m Response
 websockets tvServerState = runWebSocketsHappstack (editorApp tvServerState)
 
--- editorServer :: TVar ServerState -> Server EditorAPI
 editorServer :: (MonadIO m, MonadPlus m) => TVar ServerState -> ServerPartT m Response
 editorServer tvServerState = dir "editor" $ serveClient
   where
@@ -145,8 +136,8 @@ editorServer tvServerState = dir "editor" $ serveClient
                , dir "runmain.js" $ serveFile (asContentType "application/javascript") (basePath ++ "runmain.js")
                , dir "websockets" $ websockets tvServerState
                ]
-main :: IO ()
-main =
+
+mkEditor :: (MonadIO m, MonadPlus m) => IO (ServerPartT m Response)
+mkEditor =
   do tvServerState <- atomically (newTVar initialServerState)
-     simpleHTTP nullConf $ editorServer tvServerState
--}
+     pure $ editorServer tvServerState

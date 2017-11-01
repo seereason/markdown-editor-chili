@@ -21,7 +21,6 @@ library
                        http-api-data,
                        lens,
                        patches-vector,
-                       servant,
                        text >=1.2 && <1.3,
                        userid,
                        vector
