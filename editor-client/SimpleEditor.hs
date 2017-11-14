@@ -1445,6 +1445,7 @@ initModel = Model
   , _selectionData = Nothing
   , _currentRange  = Nothing
   , _documentRange = Nothing
+  , _rangeAnchor   = Nothing
   , _userId        = UserId 0
   , _lastActivity  = 0
   , _mouseActivity = MouseNoop
