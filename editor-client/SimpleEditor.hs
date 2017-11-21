@@ -46,6 +46,7 @@ import Chili.HSX
 import Chili.Loop (loop)
 import Chili.Types
 import           Data.Aeson (FromJSON, ToJSON, decodeStrict, encode)
+import Chili.TDVar (TDVar, readTDVar, writeTDVar)
 import Data.Char (chr)
 import qualified Data.ByteString.Char8 as CS
 import qualified Data.ByteString.Lazy.Char8 as C
@@ -92,6 +93,14 @@ debugStrLn = putStrLn
 
 debugPrint :: (Show a) => a -> IO ()
 debugPrint = print
+
+withModel :: TDVar model -> (model -> IO (Maybe model)) -> IO ()
+withModel modelV f =
+  do model <- atomically $ readTDVar modelV
+     mmodel <- f model
+     case mmodel of
+       Nothing -> pure ()
+       (Just model') -> atomically $ writeTDVar modelV model'
 
 safeApply :: (Eq a) => Patch a -> Vector a -> Vector a
 safeApply p v =
@@ -941,8 +950,8 @@ refocus model =
      (Just editorElem) <- getElementById doc "editor"
      focus editorElem
 
-keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> WithModel Model -> IO ()
-keyPressed sendWS e withModel = withModel $ \model'' ->
+keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> TDVar Model -> IO ()
+keyPressed sendWS e modelV = withModel modelV $ \model'' ->
   do model <- updateEditorPos model''
      let c = chr (charCode e)
          rc = RichChar (model ^. currentFont) c
@@ -962,9 +971,9 @@ keyPressed sendWS e withModel = withModel $ \model'' ->
 
 keyDowned :: (WebSocketReq -> IO ())
           -> KeyboardEventObject
-          -> WithModel Model
+          -> TDVar Model
           -> IO ()
-keyDowned sendWS e withModel = withModel $ \model'' ->
+keyDowned sendWS e modelV = withModel modelV $ \model'' ->
  do putStrLn $ "KeyDowned "++ (show $ keyCode e)
     model <- updateEditorPos model''
     let c = (keyCode e)
@@ -1133,11 +1142,11 @@ If the mouse is click, dragged, and released, then we update the selection -- an
 
 -}
 
-selectEditor :: (WebSocketReq -> IO ()) -> MouseEvent -> MouseEventObject -> WithModel Model -> IO ()
-selectEditor sendWS mouseEV mouseEventObject withModel =
+selectEditor :: (WebSocketReq -> IO ()) -> MouseEvent -> MouseEventObject -> TDVar Model -> IO ()
+selectEditor sendWS mouseEV mouseEventObject modelV =
   do -- putStrLn $ "selectEditor: " ++ show mouseEV
      preventDefault mouseEventObject
-     withModel $ \m ->
+     withModel modelV $ \m ->
        case m ^. mouseActivity of
          MouseNoop ->
            case mouseEV of
@@ -1282,8 +1291,8 @@ extractRange (b', e') localDocument =
       (b, e) = (min b' e', max b' e')
   in Vector.slice b (e - b) flattened
 
-boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
-boldChange sendWS ev withModel = withModel $ \model->
+boldChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> TDVar Model -> IO ()
+boldChange sendWS ev modelV = withModel modelV $ \model->
   do preventDefault ev
      stopPropagation ev
      refocus model
@@ -1295,8 +1304,8 @@ boldChange sendWS ev withModel = withModel $ \model->
        (Just (b,e)) ->
          do boldRange sendWS (min b e, max b e) model
 
-italicChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
-italicChange sendWS ev withModel = withModel $ \model->
+italicChange :: (WebSocketReq -> IO ()) -> MouseEventObject -> TDVar Model -> IO ()
+italicChange sendWS ev modelV = withModel modelV $ \model->
   do preventDefault ev
      stopPropagation ev
      refocus model
@@ -1306,15 +1315,15 @@ italicChange sendWS ev withModel = withModel $ \model->
        (Just (b,e)) ->
          do italicizeRange sendWS (min b e, max b e) model
 
-itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> WithModel Model -> IO ()
-itemize sendWS e withModel =  withModel $ \model->
+itemize :: (WebSocketReq -> IO ()) -> MouseEventObject -> TDVar Model -> IO ()
+itemize sendWS e modelV =  withModel modelV $ \model->
   do preventDefault e
      case model ^. itemizing of
        False -> handleAction sendWS (InsertAtom Item) (model & itemizing .~ True)
        True  -> pure $ Just $ model & itemizing .~ False
 
-editorCopy :: ClipboardEventObject -> WithModel Model -> IO ()
-editorCopy e withModel =  withModel $ \model->
+editorCopy :: ClipboardEventObject -> TDVar Model -> IO ()
+editorCopy e modelV =  withModel modelV $ \model->
   do preventDefault e
      dt <- clipboardData e
      setDataTransferData dt "text/plain" "boo-yeah"
@@ -1322,7 +1331,7 @@ editorCopy e withModel =  withModel $ \model->
 
 app :: (WebSocketReq -> IO ()) -> Model -> Html Model
 app sendWS model =
-  let setFontSize s = EL Click (\e withModel -> withModel $ \m -> pure $ Just $ m & (currentFont . fontSize) .~ s)
+  let setFontSize s = EL Click (\e modelV -> withModel modelV $ \m -> pure $ Just $ m & (currentFont . fontSize) .~ s)
   in
          ([hsx|
            <div>
@@ -1450,13 +1459,13 @@ initModel = Model
   , _mouseActivity = MouseNoop
   }
 
-initAction :: (WebSocketReq -> IO ()) -> WithModel Model -> IO ()
-initAction sendWS withModel = withModel $ \model ->
+initAction :: (WebSocketReq -> IO ()) -> TDVar Model -> IO ()
+initAction sendWS modelV = withModel modelV $ \model ->
   do let rcs = nub $ richTextToRichChars bullet
      newMetrics <- calcMetrics (model ^. fontMetrics) rcs
      sendWS (WebSocketReq ReqInit)
 
-     cb <- asyncCallback $ activityTimeout withModel
+     cb <- asyncCallback $ activityTimeout modelV
      js_setTimeout cb 2000
 
 --     (Just doc) <- currentDocument
@@ -1464,18 +1473,18 @@ initAction sendWS withModel = withModel $ \model ->
 
      pure (Just $ model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
        where
-         activityTimeout withModel =
+         activityTimeout modelV =
            do now <- getPOSIXTime
-              withModel $ \model ->
+              withModel modelV $ \model ->
                 if ((now > (model ^. lastActivity + 1)) && (not $ null $ model ^. localDocument . pendingEdit))
                    then do putStrLn "force patch send"
                            model' <- sendPatch sendWS model
                            pure $ Just $ model' & lastActivity .~ now
                    else pure Nothing
-              cb <- asyncCallback $ activityTimeout withModel
+              cb <- asyncCallback $ activityTimeout modelV
               js_setTimeout cb 500
 
-resInit withModel conn initDoc = withModel $ \model ->
+resInit modelV conn initDoc = withModel modelV $ \model ->
   do let toRCs :: Atom -> [RichChar]
          toRCs (Img {})      = []
          toRCs (LineBreak)   = []
@@ -1502,8 +1511,8 @@ resInit withModel conn initDoc = withModel $ \model ->
                                                          (Just f) -> f
           )
 
-resAppendPatch sendWS withModel connId (patchId, newPatch) =
-  withModel $ \model ->
+resAppendPatch sendWS modelV connId (patchId, newPatch) =
+  withModel modelV $ \model ->
    do model' <-  case () of
        () | model ^. connectionId == (Just connId) ->
             do putStrLn "resAppendPatch: Got own patch back"
@@ -1564,8 +1573,8 @@ logMessage messageEvent =
                               consoleLog (JS.pack (show (toByteString 0 Nothing buf)))
                               -- -- (show ((decodeStrict (toByteString 0 Nothing (createFromArrayBuffer r))) :: Maybe WebSocketRes)))
 
-handleMessage :: (WebSocketReq -> IO ()) -> MessageEvent -> WithModel Model -> IO ()
-handleMessage sendWS messageEvent withModel =
+handleMessage :: (WebSocketReq -> IO ()) -> MessageEvent -> TDVar Model -> IO ()
+handleMessage sendWS messageEvent modelV =
   do logMessage messageEvent
      case decodeRes messageEvent of
        Nothing ->
@@ -1573,8 +1582,8 @@ handleMessage sendWS messageEvent withModel =
             pure ()
        (Just res) ->
          case res of
-           (ResAppendPatch connId (i, path)) -> resAppendPatch sendWS withModel connId (i, path)
-           (ResInit connId doc) -> resInit withModel connId doc
+           (ResAppendPatch connId (i, path)) -> resAppendPatch sendWS modelV connId (i, path)
+           (ResInit connId doc) -> resInit modelV connId doc
 
 decodeRes :: MessageEvent -> (Maybe WebSocketRes)
 decodeRes messageEvent =
