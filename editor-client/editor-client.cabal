@@ -35,8 +35,8 @@ library
   default-language:    Haskell2010
 
 executable editor-client
-  main-is:             SimpleEditor.hs
-  buildable:           False
+  main-is:             Main.hs
+  buildable:           True
   other-extensions:    DataKinds, TypeFamilies, DeriveGeneric, TypeOperators, FlexibleInstances, OverloadedStrings, MultiParamTypeClasses, FlexibleContexts, UndecidableInstances, QuasiQuotes, RecordWildCards, ScopedTypeVariables, TemplateHaskell, ParallelListComp
   build-depends:       aeson,
                        base >=4.8 && <4.9,

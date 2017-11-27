@@ -904,7 +904,7 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: may
     -- if we are at index 0, then we have found the position, return Right
     go' _  _ 0 curPos = {- trace ("go' 0 = " ++ show (0, curPos)) -} (Right (Just curPos))
     -- if the last item in a line is a LineBreak
-    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak " ++ show (x,y,height)) $ Left (pred i, (x,y + lineHeight,height), True) -- trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
+    go' (atom:[]) lineHeight i (x,y,height) | atom ^. boxContent == LineBreak = trace ("go' LineBreak " ++ show (x,y,height)) $ Left (pred i, (0, y + lineHeight,height), True) -- trace ("go' LineBreak") $ (Left (pred i, (0, y + lineHeight, height)))
 
     go' (box:boxes) lineHeight i (x,y,height) =
       -- if the index is greater than the length of the next atom
@@ -923,6 +923,7 @@ indexToPos i model = go (model ^. layout ^. boxContent) i (0,0,16) -- FIMXE: may
 -}
                  in Right (Just (x + x', y + (lineHeight - (boxForHeight ^. boxHeight)), boxForHeight ^. boxHeight))
 
+-- | create a style element that will position the caret at the specified position
 caretPos :: Model -> Maybe (Double, Double, Double) -> [KV Text Text]
 caretPos model Nothing = []
 caretPos model (Just (x, y, height)) =
