@@ -970,6 +970,22 @@ keyPressed sendWS e modelV = withModel modelV $ \model'' ->
                       (Just metric) -> set (fontMetrics . at rc) (Just metric) model
      handleAction sendWS (InsertAtom (RC rc)) model'
 
+-- FIXME: lineheigh is probably not right because it is the height of the current line, but 'y' in the top of that line.
+previousLine :: Model -> Int -> Maybe Int
+previousLine model pos =
+  case indexToPos pos model of
+    Nothing -> Nothing
+    (Just (x,y,lineHeight)) ->
+      if (y >= lineHeight)
+      then fst <$> indexAtPos (model ^. fontMetrics) (model ^. layout) (x, y - lineHeight)
+      else Nothing
+
+nextLine :: Model -> Int -> Maybe Int
+nextLine model pos =
+  case indexToPos pos model of
+    Nothing -> Nothing
+    (Just (x,y,lineHeight)) -> fst <$> indexAtPos (model ^. fontMetrics) (model ^. layout) (x, y + lineHeight)
+
 keyDowned :: (WebSocketReq -> IO ())
           -> KeyboardEventObject
           -> TDVar Model
@@ -1002,9 +1018,17 @@ keyDowned sendWS e modelV = withModel modelV $ \model'' ->
                              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
                        in handleAction sendWS (InsertAtom (RC rc)) model'
         | c == 37   -> handleAction sendWS (MoveCaret ((model ^. caret) - 1)) model -- left
-        | c == 38   -> pure Nothing -- model                                        -- up
+        | c == 38   -> case previousLine model (model ^. caret) of
+            Nothing -> do putStrLn "previous line not found"
+                          pure Nothing                                                 -- up
+            (Just i) -> do putStrLn $ "previousLine model ^. caret = " ++ show (model ^. caret) ++ " i = "++ show i
+                           handleAction sendWS (MoveCaret i) model
         | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
-        | c == 40   -> pure Nothing -- model                                        -- down
+        | c == 40   -> case nextLine model (model ^. caret) of -- down
+            Nothing -> do putStrLn "next line not found"
+                          pure Nothing                                                 -- up
+            (Just i) -> do putStrLn $ "nextLine model ^. caret = " ++ show (model ^. caret) ++ " i = "++ show i
+                           handleAction sendWS (MoveCaret i) model
         | otherwise -> pure Nothing -- model
 
 buttonUp :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
