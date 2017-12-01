@@ -482,11 +482,12 @@ lineAtY vbox y = go (vbox ^. boxContent) y 0
 indexAtX :: FontMetrics -> HBox [AtomBox] -> Double -> (Int, Int)
 indexAtX fm hbox x = go (hbox ^. boxContent) x 0
   where
+    -- NOTE: we stopped using RichText so this probably isn't used
     indexAtX' :: [RichChar] -> Double -> (Int, Int) -> (Int, Int)
     indexAtX' [] x (i, si) = (i, si)
     indexAtX' (c:cs) x (i, si) =
       let cWidth =  fst $ fromJust $ Map.lookup c fm
-      in if x < cWidth
+      in if x < (cWidth / 2)
          then (i, si)
          else indexAtX' cs (x - cWidth) (succ i, succ si)
     go :: [AtomBox] -> Double -> Int -> (Int, Int)
@@ -494,7 +495,7 @@ indexAtX fm hbox x = go (hbox ^. boxContent) x 0
     go (box:boxes) x i =
       case box ^. boxContent of
         (RC rc)
-          | x < (box ^. boxWidth) -> (i, 0)
+          | x < ((box ^. boxWidth) / 2) -> (i, 0)
           | otherwise -> go boxes (x - box ^. boxWidth) (i + 1)
         (RT txt')
          | x < (box ^. boxWidth) ->
