@@ -184,6 +184,7 @@ data Model = Model
   , _userId        :: UserId
   , _lastActivity  :: POSIXTime
   , _mouseActivity :: MouseActivity
+  , _editorName    :: JS.JSString
   }
 makeLenses ''Model
 
@@ -821,16 +822,17 @@ renderAtomBoxes lines =
 -- should use a better abstraction so that things can not get out of
 -- sync
 
-renderLayout :: VBox [HBox [AtomBox]]
-          -> Html Model
-renderLayout lines =
+renderLayout :: JS.JSString
+             -> VBox [HBox [AtomBox]]
+             -> Html Model
+renderLayout suffix lines =
   [hsx|
-    <div id="editor-layout" data-path="root">
+    <div id=("editor-layout-" <> suffix) data-path="root">
      <% renderAtomBoxes lines %>
 --        <% textToHtml fm maxWidth 2 $ Text.pack $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% addP $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
 --      <% show $ map p $ rlines $ Vector.toList (apply (Patch.fromList edits) mempty) %>
-     <span id="editor-end"></span>
+     <span id=("editor-end-" <> suffix)></span>
     </div>
   |]
 
@@ -941,7 +943,7 @@ caretPos model (Just (x, y, height)) =
 updateEditorPos :: Model -> IO Model
 updateEditorPos model =
   do (Just doc)        <- currentDocument
-     (Just editorElem) <- getElementById doc "editor"
+     (Just editorElem) <- getElementById doc ("editor-" <> (model ^. editorName))
      focus editorElem
      rect <- getBoundingClientRect editorElem
      pure $ model { _editorPos = Just rect}
@@ -949,7 +951,7 @@ updateEditorPos model =
 refocus :: Model -> IO ()
 refocus model =
   do (Just doc)        <- currentDocument
-     (Just editorElem) <- getElementById doc "editor"
+     (Just editorElem) <- getElementById doc ("editor-" <> (model ^. editorName))
      focus editorElem
 
 keyPressed :: (WebSocketReq -> IO ()) -> KeyboardEventObject -> TDVar Model -> IO ()
@@ -1085,7 +1087,7 @@ commonSelection sendWS newSelection e model'' =
               Nothing -> pure Nothing
               (Just range) ->
                    do (Just doc) <- currentDocument
-                      (Just editorNode) <- getElementById  doc "editor-layout"
+                      (Just editorNode) <- getElementById  doc ("editor-layout-" <> (model ^. editorName))
                       -- debugStrLn "editor-layout"
                       nt <- nodeType editorNode
                       -- debugStrLn $ nodeTypeString nt
@@ -1097,7 +1099,7 @@ commonSelection sendWS newSelection e model'' =
                         case mSelNode of
                           -- assumption is that the selection was past the end of the document
                           Nothing -> do debugPrint "commonSelection: apparent selection beyond end of document"
-                                        (Just editorEndNode) <- getElementById  doc "editor-end"
+                                        (Just editorEndNode) <- getElementById  doc ("editor-end-" <> (model ^. editorName))
                                         pure (toJSNode editorEndNode)
 --                                        pure (Just model')
                           (Just selNode) -> pure selNode
@@ -1385,7 +1387,7 @@ app sendWS model =
                                        </div>
                              %>
 -}
-
+-}
                              <p>indexToPos (x,y,h): <% show (indexToPos (model ^. caret) model) %> </p>
                              <p>caretPos: <% show $ caretPos model (indexToPos (model ^. caret) model) %></p>
                              <p>mousePos: <% show (model ^. mousePos) %></p>
@@ -1406,10 +1408,10 @@ app sendWS model =
                                                 Nothing -> "(,)"
                                                 (Just pos) -> show (rectLeft pos, rectTop pos) %></p>
 
-                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
+--                             <p>line heights: <% show (map _boxHeight (model ^. layout ^. boxContent)) %></p>
 --                             <p>Font Metrics <% show (model ^. fontMetrics) %></p>
-                             <p>Vector Atom: <div><% show $ flattenDocument (model ^. localDocument) %></div></p>
--}
+--                             <p>Vector Atom: <div><% show $ flattenDocument (model ^. localDocument) %></div></p>
+
 --                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>
@@ -1429,18 +1431,18 @@ app sendWS model =
               </div>
              </div>
             </div>
-            <div id="editor" tabindex="1" style="outline: 0; line-height: 1.0; height: 300px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" [ EL KeyPress (keyPressed sendWS)
-                             , EL KeyDown  (keyDowned sendWS)
-                             , EL MouseDown (selectEditor sendWS MouseDown)
-                             , EL MouseUp   (selectEditor sendWS MouseUp)
-                             , EL MouseMove (selectEditor sendWS MouseMove)
+            <div id=("editor-" <> (model ^. editorName)) tabindex="1" style="outline: 0; line-height: 1.0; height: 300px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" class="editor" [ EL KeyPress (keyPressed sendWS)
+                        , EL KeyDown  (keyDowned sendWS)
+                        , EL MouseDown (selectEditor sendWS MouseDown)
+                        , EL MouseUp   (selectEditor sendWS MouseUp)
+                        , EL MouseMove (selectEditor sendWS MouseMove)
 --                             , EL Click (selectEditor sendWS Click)
 --                             , EL Click    (clickEditor sendWS)
 --                             , EL Copy     editorCopy
-                             , OnCreate (\el _ -> focus el)
-                             ] >
-            <div id="caret" class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
-               <% renderLayout (model ^. layout) %>
+                        , OnCreate (\el _ -> focus el)
+                        ] >
+            <div id=("caret-" <> (model ^. editorName)) class="editor-caret" (caretPos model (indexToPos (model ^. caret) model))></div>
+               <% renderLayout (model ^. editorName) (model ^. layout) %>
             </div>
 
            </div>
@@ -1455,7 +1457,7 @@ chili app initAction model url handleWS elemId =
 --     updateModel initAction
 
 
-initModel = Model
+initModel suffix = Model
   { _localDocument      = LocalDocument
       { _document = emptyDocument
       , _inflightPatch = Nothing
@@ -1483,8 +1485,10 @@ initModel = Model
   , _userId        = UserId 0
   , _lastActivity  = 0
   , _mouseActivity = MouseNoop
+  , _editorName    = suffix
   }
 
+-- | this gets called after the first render -- so DOM elements should exist
 initAction :: (WebSocketReq -> IO ()) -> TDVar Model -> IO ()
 initAction sendWS modelV = withModel modelV $ \model ->
   do let rcs = nub $ richTextToRichChars bullet
@@ -1497,7 +1501,8 @@ initAction sendWS modelV = withModel modelV $ \model ->
 --     (Just doc) <- currentDocument
 --     addEventListener doc SelectionChange (\e -> updateSelection e withModel) False
 
-     pure (Just $ model & fontMetrics  %~ (\old -> old `mappend` newMetrics))
+     pure (Just $ model & fontMetrics  %~ (\old -> old `mappend` newMetrics)
+          )
        where
          activityTimeout modelV =
            do now <- getPOSIXTime

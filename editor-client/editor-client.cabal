@@ -42,7 +42,7 @@ executable editor-client
                        base >=4.8 && <4.9,
                        bytestring >=0.10 && <0.11,
                        containers,
-                       chili,
+                       chili >= 0.1.1,
                        editor-common,
                        ghcjs-base,
                        hsx2hs,

@@ -12,7 +12,7 @@
        {
         color: red;
        }
-       #editor {
+       .editor {
          cursor: text;
          position: relative;
        }
