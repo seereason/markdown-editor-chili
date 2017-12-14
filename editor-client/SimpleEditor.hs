@@ -188,10 +188,11 @@ data Model = Model
   }
 makeLenses ''Model
 
+-- | the only reason `MoveCaret` is here is so that we can show the caret position of multiple people editing the same document
 data EditAction
   = InsertAtom Atom
   | DeleteAtom
-  | MoveCaret Index
+  | MoveCaret Index -- ^ new index, extend selection
     deriving Show
 
 bullet :: RichText
@@ -402,6 +403,7 @@ sendPatch sendWS model =
                                 & (localDocument . inflightPatch) .~ Just p
          (Just ifp) -> error "Handle inflight patch support in sendPatch"
   else pure model
+
 
 handleAction :: (WebSocketReq -> IO ()) -> EditAction -> Model -> IO (Maybe Model)
 handleAction sendWS editAction model =
@@ -997,6 +999,7 @@ keyDowned sendWS e modelV = withModel modelV $ \model'' ->
  do putStrLn $ "KeyDowned "++ (show $ keyCode e)
     model <- updateEditorPos model''
     let c = (keyCode e)
+        shift = shiftKey e
     when (keyCode e == 8 || keyCode e == 32 || keyCode e == 13 || (keyCode e >= 37 && keyCode e <= 40)) (putStrLn "preventDefault" >> preventDefault e)
     newFontMetrics <-
        case () of
@@ -1020,7 +1023,14 @@ keyDowned sendWS e modelV = withModel modelV $ \model'' ->
                              Nothing -> model
                              (Just metric) -> set (fontMetrics . at rc) (Just metric) model
                        in handleAction sendWS (InsertAtom (RC rc)) model'
-        | c == 37   -> handleAction sendWS (MoveCaret ((model ^. caret) - 1)) model -- left
+        | c == 37   ->
+            do -- FIXME: limit bounds?
+               model' <- if shift
+                         then if (isNothing $ model ^. documentRange)
+                              then (extendSelection False ((model ^. caret) - 1, 0))  =<< (extendSelection True ((model ^. caret), 0) model)
+                              else extendSelection False ((model ^. caret) - 1, 0) model
+                         else clearSelection model
+               handleAction sendWS (MoveCaret ((model' ^. caret) - 1)) model' -- left
         | c == 38   -> case previousLine model (model ^. caret) of
             Nothing -> do putStrLn "previous line not found"
                           pure Nothing                                                 -- up
@@ -1044,6 +1054,7 @@ buttonUp sendWS e model'' =
          model' = model & mousePos  ?~ (clientX e, clientY e)
                         & caret     .~ (fromMaybe (model ^. caret) mIndex)
                         & targetPos .~ (Just targetRect)
+                        -- if the documentRange is empty replace it with `Nothing`
                         & documentRange .~ case model ^. documentRange of
                                              (Just (b,e)) | b == e -> Nothing
                                              dr -> dr
@@ -1057,8 +1068,8 @@ span. But we want to be able to select subtext, so we need to know the
 offset into that span.
 -}
 
-commonSelection :: (WebSocketReq -> IO ()) -> Bool -> MouseEventObject -> Model -> IO (Maybe Model)
-commonSelection sendWS newSelection e model'' =
+commonSelectionOld :: (WebSocketReq -> IO ()) -> Bool -> MouseEventObject -> Model -> IO (Maybe Model)
+commonSelectionOld sendWS newSelection e model'' =
   do -- first update our record of the position of the editor on the screen
      model <- updateEditorPos model''
      -- then get the bounding rectangle of whatever was clicked
@@ -1070,7 +1081,7 @@ commonSelection sendWS newSelection e model'' =
                         & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
                         & targetPos .~ (Just targetRect)
      case mIndex of
-       Nothing  -> pure $ Just $ model'' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
        (Just (i, si)) ->
          do mRange <- if newSelection
               then do debugStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
@@ -1089,9 +1100,9 @@ commonSelection sendWS newSelection e model'' =
                    do (Just doc) <- currentDocument
                       (Just editorNode) <- getElementById  doc ("editor-layout-" <> (model ^. editorName))
                       -- debugStrLn "editor-layout"
-                      nt <- nodeType editorNode
+                      -- nt <- nodeType editorNode
                       -- debugStrLn $ nodeTypeString nt
-                      nn <- nodeName editorNode
+                      -- nn <- nodeName editorNode
                       -- debugStrLn $ JS.unpack nn
                       (Just lines) <- fmap toJSNode <$> getFirstChild editorNode
                       mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) lines 0
@@ -1123,9 +1134,9 @@ commonSelection sendWS newSelection e model'' =
                                                     setStart range (toJSNode textNode) si
                                                     setEnd range (toJSNode textNode) si
                                                     pure (toJSNode textNode, si)
-                                       handleAction sendWS (MoveCaret i) (model' & currentRange .~ Just range
+                                       handleAction sendWS (MoveCaret i) (model' & currentRange  .~ Just range
                                                                                  & documentRange .~ Just (i, i)
-                                                                                 & rangeAnchor .~ Just (node, off)
+                                                                                 & rangeAnchor   .~ Just (node, off)
                                                                          )
                                else do let Just (node, off) = model' ^. rangeAnchor
                                        case mTextNode of
@@ -1159,6 +1170,160 @@ commonSelection sendWS newSelection e model'' =
 --                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> if i > b then (b, i) else (i, e)) dr)) -- (min b i, max e i)) dr))
                                        -- why do I want min/max here? It makes it so that you can make the selection bigger, but never smaller
 --                                       handleAction sendWS (MoveCaret i) (model' & documentRange %~ (\dr -> fmap (\(b,e) -> (min b i, max e i)) dr))
+
+
+
+clearSelection :: Model -> IO Model
+clearSelection m =
+  do w     <- window
+     sel   <- getSelection w
+     removeAllRanges sel
+     pure $ m { _documentRange = Nothing
+              , _currentRange  = Nothing
+              }
+
+commonSelection :: (WebSocketReq -> IO ()) -> Bool -> MouseEventObject -> Model -> IO (Maybe Model)
+commonSelection sendWS newSelection e model'' =
+  do -- first update our record of the position of the editor on the screen
+     model <- updateEditorPos model''
+     -- then get the bounding rectangle of whatever was clicked
+     targetRect <- getBoundingClientRect (target e)
+
+     let (Just (x,y)) = relativeClickPos model (clientX e) (clientY e)
+         mIndex = indexAtPos (model ^. fontMetrics) (model ^. layout) (x,y)
+         model' = model & mousePos  ?~ (clientX e, clientY e)
+                        & caret     .~ (fromMaybe (model ^. caret) (fst <$> mIndex))
+                        & targetPos .~ (Just targetRect)
+     case mIndex of
+       Nothing  -> pure $ Just $ model' & debugMsg .~ (Just $ Text.pack "Could not find the index of the mouse click.")
+       (Just (i, si)) ->
+         do mRange <- if newSelection
+              then do debugStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
+                      w     <- window
+                      range <- newRange
+                      sel   <- getSelection w
+                      removeAllRanges sel
+                      addRange sel range
+                      pure (Just range)
+              else do debugStrLn $ "update selection to index="++ show i ++ ", subindex=" ++ show si
+                      pure $ model ^. currentRange
+
+            case mRange of
+              Nothing -> pure Nothing
+              (Just range) ->
+                   do (Just doc) <- currentDocument
+                      (Just editorNode) <- getElementById  doc ("editor-layout-" <> (model ^. editorName))
+                      -- debugStrLn "editor-layout"
+                      -- nt <- nodeType editorNode
+                      -- debugStrLn $ nodeTypeString nt
+                      -- nn <- nodeName editorNode
+                      -- debugStrLn $ JS.unpack nn
+                      (Just lines) <- fmap toJSNode <$> getFirstChild editorNode
+                      mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) lines 0
+                      selNode <-
+                        case mSelNode of
+                          -- assumption is that the selection was past the end of the document
+                          Nothing -> do debugPrint "commonSelection: apparent selection beyond end of document"
+                                        (Just editorEndNode) <- getElementById  doc ("editor-end-" <> (model ^. editorName))
+                                        pure (toJSNode editorEndNode)
+--                                        pure (Just model')
+                          (Just selNode) -> pure selNode
+                      -- nt <- nodeType selNode
+                      -- debugStrLn $ nodeTypeString nt
+                      -- nn <- nodeName selNode
+                      -- debugStrLn $ JS.unpack nn
+                      -- selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                      -- debugStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                      mTextNode <- getFirstChild selNode
+                      model' <- extendSelection newSelection (i, si) model
+                      handleAction sendWS (MoveCaret i) model'
+
+
+extendSelection newSelection (i, si) model =
+         do mRange <- if newSelection
+              then do debugStrLn $ "Selection started at index="++ show i ++ ", subindex=" ++ show si
+                      w     <- window
+                      range <- newRange
+                      sel   <- getSelection w
+                      removeAllRanges sel
+                      addRange sel range
+                      pure (Just range)
+              else do debugStrLn $ "update selection to index="++ show i ++ ", subindex=" ++ show si
+                      pure $ model ^. currentRange
+
+            case mRange of
+              Nothing -> pure model
+              (Just range) ->
+                   do (Just doc) <- currentDocument
+                      (Just editorNode) <- getElementById  doc ("editor-layout-" <> (model ^. editorName))
+                      -- debugStrLn "editor-layout"
+                      -- nt <- nodeType editorNode
+                      -- debugStrLn $ nodeTypeString nt
+                      -- nn <- nodeName editorNode
+                      -- debugStrLn $ JS.unpack nn
+                      (Just lines) <- fmap toJSNode <$> getFirstChild editorNode
+                      mSelNode <- getHBoxNode i (model ^. layout ^. boxContent) lines 0
+                      selNode <-
+                        case mSelNode of
+                          -- assumption is that the selection was past the end of the document
+                          Nothing -> do debugPrint "commonSelection: apparent selection beyond end of document"
+                                        (Just editorEndNode) <- getElementById  doc ("editor-end-" <> (model ^. editorName))
+                                        pure (toJSNode editorEndNode)
+--                                        pure (Just model')
+                          (Just selNode) -> pure selNode
+                      -- nt <- nodeType selNode
+                      -- debugStrLn $ nodeTypeString nt
+                      -- nn <- nodeName selNode
+                      -- debugStrLn $ JS.unpack nn
+                      -- selNodeTxt <- getInnerHTML (JSElement (unJSNode selNode))
+                      -- debugStrLn $ "selNodeTxt = " ++ JS.unpack selNodeTxt
+                      mTextNode <- getFirstChild selNode
+                      if newSelection
+                               then do (node, off) <-
+                                             case mTextNode of
+                                               Nothing ->
+                                                 do setStart range (toJSNode selNode) 0
+                                                    setEnd   range (toJSNode selNode) 0
+                                                    pure (toJSNode selNode, 0)
+                                               (Just textNode) ->
+                                                 do -- jstr <- nodeValue textNode
+                                                    -- debugStrLn $ "nodeValue = " ++ JS.unpack jstr
+                                                    setStart range (toJSNode textNode) si
+                                                    setEnd range (toJSNode textNode) si
+                                                    pure (toJSNode textNode, si)
+                                       pure $ (model & currentRange  .~ Just range
+                                                     & documentRange .~ Just (i, i)
+                                                     & rangeAnchor   .~ Just (node, off)
+                                              )
+                               else do let Just (node, off) = model ^. rangeAnchor
+                                       case mTextNode of
+                                         Nothing -> do
+                                           case model ^. documentRange of
+                                             Nothing -> pure ()
+                                             (Just (b,e))
+                                               | i > b ->
+                                                   do setStart range node off
+                                                      setEnd range (toJSNode selNode) 0
+                                               | i <= b ->
+                                                   do setStart range (toJSNode selNode) 0
+                                                      setEnd range node off
+                                         (Just textNode) ->
+                                           case model ^. documentRange of
+                                             Nothing -> pure ()
+                                             (Just (b,e))
+                                               | i > b ->
+                                                 do setStart range node off
+                                                    setEnd range (toJSNode textNode) si
+{-
+                                               | i == b ->
+                                                 do setStart range (toJSNode textNode) si
+                                                    setEnd range (toJSNode textNode) si
+-}
+                                               | i <= b ->
+                                                   do setStart range (toJSNode textNode) si
+                                                      setEnd range node off
+                                       pure (model & documentRange %~ (\dr -> fmap (\(b,e) -> (b,i)) dr))
+
 
 {-
 
@@ -1431,8 +1596,8 @@ app sendWS model =
               </div>
              </div>
             </div>
-            <div id=("editor-" <> (model ^. editorName)) tabindex="1" style="outline: 0; line-height: 1.0; height: 300px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" class="editor" [ EL KeyPress (keyPressed sendWS)
-                        , EL KeyDown  (keyDowned sendWS)
+            <div id=("editor-" <> (model ^. editorName)) tabindex="1" style="outline: 0; line-height: 1.0; height: 300px; width: 500px; border: 1px solid black; box-shadow: 2px 2px 2px 1px rgba(0, 0, 0, 0.2);" class="editor" [ EL KeyPress  (keyPressed sendWS)
+                        , EL KeyDown   (keyDowned sendWS)
                         , EL MouseDown (selectEditor sendWS MouseDown)
                         , EL MouseUp   (selectEditor sendWS MouseUp)
                         , EL MouseMove (selectEditor sendWS MouseMove)
