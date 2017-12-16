@@ -13,7 +13,7 @@ library
   exposed-modules:     SimpleEditor
   other-extensions:    DataKinds, TypeFamilies, DeriveGeneric, TypeOperators, FlexibleInstances, OverloadedStrings, MultiParamTypeClasses, FlexibleContexts, UndecidableInstances, QuasiQuotes, RecordWildCards, ScopedTypeVariables, TemplateHaskell, ParallelListComp
   build-depends:       aeson,
-                       base >=4.8 && <4.9,
+                       base >=4.8 && <4.10,
                        bytestring >=0.10 && <0.11,
                        containers,
                        chili,
@@ -29,7 +29,7 @@ library
 --                       servant-isomaniac,
                        stm,
                        text >=1.2 && <1.3,
-                       time >=1.5 && <1.6,
+                       time >=1.5 && <1.7,
                        userid,
                        vector
   default-language:    Haskell2010
@@ -39,7 +39,7 @@ executable editor-client
   buildable:           True
   other-extensions:    DataKinds, TypeFamilies, DeriveGeneric, TypeOperators, FlexibleInstances, OverloadedStrings, MultiParamTypeClasses, FlexibleContexts, UndecidableInstances, QuasiQuotes, RecordWildCards, ScopedTypeVariables, TemplateHaskell, ParallelListComp
   build-depends:       aeson,
-                       base >=4.8 && <4.9,
+                       base >=4.8 && <4.10,
                        bytestring >=0.10 && <0.11,
                        containers,
                        chili >= 0.1.2,
@@ -55,7 +55,7 @@ executable editor-client
 --                       servant-isomaniac,
                        stm,
                        text >=1.2 && <1.3,
-                       time >=1.5 && <1.6,
+                       time >=1.5 && <1.7,
                        userid,
                        vector
   default-language:    Haskell2010

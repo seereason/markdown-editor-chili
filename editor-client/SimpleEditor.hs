@@ -1580,7 +1580,6 @@ app sendWS model =
 --                             <p>layout: <div> <% map (\l -> <p><% show l %></p>) (model ^. layout ^. boxContent) %> </div></p>
                       </div>
                  else <span></span> %>
-            <h1>Super Awesome Editor</h1>
             <div class="form-line editor-toolbar row">
             <div class="col-md-6">
               <div class="btn-group" data-toggle="buttons">
@@ -1647,6 +1646,7 @@ initModel suffix = Model
   , _selectionData = Nothing
   , _currentRange  = Nothing
   , _documentRange = Nothing
+  , _rangeAnchor   = Nothing
   , _userId        = UserId 0
   , _lastActivity  = 0
   , _mouseActivity = MouseNoop
