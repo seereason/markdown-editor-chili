@@ -941,6 +941,31 @@ caretPos model (Just (x, y, height)) =
                              )
                 ]
 
+moveCaretLeft :: Model -> Int
+moveCaretLeft model =
+  if (model ^. caret == 0)
+  then 0
+  else pred (model ^. caret)
+
+moveCaretRight :: Model -> Int
+moveCaretRight model =
+  let docLen = Vector.length (flattenDocument (model ^. localDocument))
+  in if (succ (model ^. caret) > docLen)
+     then model ^. caret
+     else succ (model ^. caret)
+
+moveCaretUp :: Model -> Int
+moveCaretUp model =
+  case previousLine model (model ^. caret) of
+    Nothing -> model ^. caret
+    (Just i) -> i
+
+moveCaretDown :: Model -> Int
+moveCaretDown model =
+  case nextLine model (model ^. caret) of
+    Nothing -> model ^. caret
+    (Just i) -> i
+
 -- | FIXME: having to call this explicitly is a source of bugs and silly repetition
 updateEditorPos :: Model -> IO Model
 updateEditorPos model =
@@ -1025,24 +1050,26 @@ keyDowned sendWS e modelV = withModel modelV $ \model'' ->
                        in handleAction sendWS (InsertAtom (RC rc)) model'
         | c == 37   ->
             do -- FIXME: limit bounds?
-               model' <- if shift
-                         then if (isNothing $ model ^. documentRange)
-                              then (extendSelection False ((model ^. caret) - 1, 0))  =<< (extendSelection True ((model ^. caret), 0) model)
-                              else extendSelection False ((model ^. caret) - 1, 0) model
-                         else clearSelection model
-               handleAction sendWS (MoveCaret ((model' ^. caret) - 1)) model' -- left
-        | c == 38   -> case previousLine model (model ^. caret) of
-            Nothing -> do putStrLn "previous line not found"
-                          pure Nothing                                                 -- up
-            (Just i) -> do putStrLn $ "previousLine model ^. caret = " ++ show (model ^. caret) ++ " i = "++ show i
-                           handleAction sendWS (MoveCaret i) model
-        | c == 39   -> handleAction sendWS (MoveCaret ((model ^. caret) + 1)) model -- right
-        | c == 40   -> case nextLine model (model ^. caret) of -- down
-            Nothing -> do putStrLn "next line not found"
-                          pure Nothing                                                 -- up
-            (Just i) -> do putStrLn $ "nextLine model ^. caret = " ++ show (model ^. caret) ++ " i = "++ show i
-                           handleAction sendWS (MoveCaret i) model
+               model' <- handleSelection moveCaretLeft model shift
+               handleAction sendWS (MoveCaret (moveCaretLeft model)) model' -- left
+        | c == 38 ->
+           do model' <- handleSelection moveCaretUp model shift
+              handleAction sendWS (MoveCaret (moveCaretUp model)) model' -- up
+        | c == 39   ->
+            do -- FIXME: limit bounds?
+               model' <- handleSelection moveCaretRight model shift
+               handleAction sendWS (MoveCaret (moveCaretRight model)) model' -- right
+        | c == 40 ->
+           do model' <- handleSelection moveCaretDown model shift
+              handleAction sendWS (MoveCaret (moveCaretDown model)) model' -- down
         | otherwise -> pure Nothing -- model
+      where
+        handleSelection alter model shift =
+            if shift
+               then if (isNothing $ model ^. documentRange)
+                    then extendSelection False ((alter model) , 0)  =<< (extendSelection True ((model ^. caret), 0) model)
+                    else extendSelection False ((alter model) , 0) model
+               else clearSelection model
 
 buttonUp :: (WebSocketReq -> IO ()) -> MouseEventObject -> Model -> IO (Maybe Model)
 buttonUp sendWS e model'' =
