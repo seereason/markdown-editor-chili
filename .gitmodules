@@ -1,0 +1,9 @@
+[submodule "editor-client"]
+	path = editor-client
+	url = git@github.com:seereason/editor-client.git
+[submodule "editor-common"]
+	path = editor-common
+	url = git@github.com:seereason/editor-common.git
+[submodule "editor-server"]
+	path = editor-server
+	url = git@github.com:seereason/editor-server.git
